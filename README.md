@@ -58,6 +58,25 @@ Requires Rust stable (Windows MSVC) and Visual Studio C++ Build Tools. Run:
 
 Output is in `dist`. Dependencies must be available locally or downloadable.
 
+## Automated builds and releases
+
+GitHub Actions tests and builds Windows x64 packages on pushes to main, pull requests to main, and manual runs from the Actions tab. Download the ZIP and SHA-256 checksum from the run's RaceDirector-windows-x64 artifact (retained for 14 days).
+
+To publish a release:
+
+1. Update the version in `native/Cargo.toml` and run `cargo check --workspace` to update Cargo.lock.
+2. Commit and push the version change and any release changes to main.
+3. Create and push a matching tag, for example:
+
+```powershell
+git tag v0.1.18
+git push origin v0.1.18
+```
+
+The tag must exactly match the native crate version. After tests and the build pass, Actions publishes a GitHub release with the install ZIP, checksum, and generated release notes. Versions with a suffix such as v0.1.18-beta.1 become prereleases. Rerunning a tag workflow replaces its release assets. Manual runs on a branch only build; they do not publish a release.
+
+The workflow uses GitHub's automatic token; no personal access token or extra secret is required. GitHub Actions must be enabled for the repository.
+
 ## License
 
 Licensed under the [MIT License](LICENSE).

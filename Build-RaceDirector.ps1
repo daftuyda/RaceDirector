@@ -24,4 +24,5 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'THIRD_PARTY_NOTICES.md') -Desti
 $licenses = Join-Path $dist 'licenses'
 New-Item -ItemType Directory -Path $licenses -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'native\vendor\hudhook-0.6.5\LICENSE') -Destination (Join-Path $licenses 'hudhook-LICENSE')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'native\vendor\hudhook-0.6.5\vendor\minhook\LICENSE.txt') -Destination (Join-Path $licenses 'minhook-LICENSE.txt')
 Write-Host "Built RaceDirector in $dist. Use Install-RaceDirector.ps1 with the game closed."
