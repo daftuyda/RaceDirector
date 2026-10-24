@@ -19,42 +19,46 @@ jobs:
   build:
     runs-on: windows-2022
     timeout-minutes: 30
+    outputs:
+      release_tag: ${{ steps.version.outputs.release_tag }}
     defaults:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust stable (Windows x64 MSVC)
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
           if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed.' }
           rustup default stable-x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain selection failed.' }
-      - name: Validate release version
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Read and validate release version
+        id: version
         env:
+          BUILD_REF: ${{ github.ref }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           $metadata = cargo metadata --no-deps --locked --format-version 1 | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
           $version = ($metadata.packages | Where-Object name -eq 'racedirector').version
-          if ($env:RELEASE_TAG -cne "v$version") { throw "Tag must match native/Cargo.toml: v$version" }
+          "release_tag=v$version" >> $env:GITHUB_OUTPUT
+          if ($env:BUILD_REF.StartsWith('refs/tags/') -and $env:RELEASE_TAG -cne "v$version") { throw "Tag must match native/Cargo.toml: v$version" }
       - name: Test and build
         run: ./Build-RaceDirector.ps1
       - name: Package ZIP and checksum
         env:
           BUILD_SHA: ${{ github.sha }}
           BUILD_REF: ${{ github.ref }}
-          BUILD_TAG: ${{ github.ref_name }}
+          BUILD_TAG: ${{ steps.version.outputs.release_tag }}
         run: |
-          $label = if ($env:BUILD_REF.StartsWith('refs/tags/')) { $env:BUILD_TAG } else { $env:BUILD_SHA.Substring(0, 8) }
+          $label = if ($env:BUILD_REF.StartsWith('refs/tags/') -or $env:BUILD_REF -eq 'refs/heads/main') { $env:BUILD_TAG } else { $env:BUILD_SHA.Substring(0, 8) }
           $name = "RaceDirector-$label-windows-x64.zip"
           New-Item -ItemType Directory -Path artifacts -Force | Out-Null
           Compress-Archive -Path dist/* -DestinationPath "artifacts/$name"
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "artifacts/$name").Hash.ToLowerInvariant()
           "$hash  $name" | Set-Content -Encoding ascii "artifacts/$name.sha256"
       - name: Upload build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: RaceDirector-windows-x64
           path: artifacts/*
@@ -62,13 +66,19 @@ jobs:
           retention-days: 14
 
   release:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
     needs: build
     runs-on: ubuntu-latest
+    concurrency:
+      group: publish-release
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v7
         with:
           name: RaceDirector-windows-x64
           path: artifacts
@@ -76,14 +86,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          RELEASE_SHA: ${{ github.sha }}
         shell: bash
         run: |
           set -euo pipefail
+          # Never attach a different commit's binaries to an existing version.
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            tag_sha=$(git rev-parse "$RELEASE_TAG^{commit}")
+            if [[ "$tag_sha" != "$RELEASE_SHA" ]]; then
+              echo "Version $RELEASE_TAG is already tagged at another commit. Bump native/Cargo.toml and Cargo.lock to publish a new release." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
           prerelease=()
           if [[ "$RELEASE_TAG" == *-* ]]; then prerelease=(--prerelease); fi
           if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" artifacts/* --clobber
           else
-            gh release create "$RELEASE_TAG" artifacts/* --verify-tag --title "RaceDirector $RELEASE_TAG" --generate-notes "${prerelease[@]}"
+            gh release create "$RELEASE_TAG" artifacts/* --target "$RELEASE_SHA" --title "RaceDirector $RELEASE_TAG" --generate-notes "${prerelease[@]}"
           fi

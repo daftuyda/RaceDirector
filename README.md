@@ -62,18 +62,13 @@ Output is in `dist`. Dependencies must be available locally or downloadable.
 
 GitHub Actions tests and builds Windows x64 packages on pushes to main, pull requests to main, and manual runs from the Actions tab. Download the ZIP and SHA-256 checksum from the run's RaceDirector-windows-x64 artifact (retained for 14 days).
 
-To publish a release:
+After a successful push to main, Actions reads the version from `native/Cargo.toml`, automatically creates its tag (for example, v0.1.17) at the built commit, and publishes the install ZIP, checksum, and generated release notes. No manual tag command is needed. A manual workflow run on main also publishes.
 
-1. Update the version in `native/Cargo.toml` and run `cargo check --workspace` to update Cargo.lock.
-2. Commit and push the version change and any release changes to main.
-3. Create and push a matching tag, for example:
+For the next release, update the version in `native/Cargo.toml`, run `cargo check --workspace` to update Cargo.lock, then commit and push both files with your changes. Version numbers are not automatically incremented.
 
-```powershell
-git tag v0.1.18
-git push origin v0.1.18
-```
+If that version is already tagged at another commit, publishing is skipped and the existing tag and release assets are preserved. Bump the version to publish the new changes. Rerunning the same tagged commit can replace its release assets or retry an interrupted release.
 
-The tag must exactly match the native crate version. After tests and the build pass, Actions publishes a GitHub release with the install ZIP, checksum, and generated release notes. Versions with a suffix such as v0.1.18-beta.1 become prereleases. Rerunning a tag workflow replaces its release assets. Manual runs on a branch only build; they do not publish a release.
+Manual version-tag pushes are also supported and must match the native crate version. Versions with a suffix such as v0.1.18-beta.1 become prereleases. Pull requests and manual runs on other branches only build; they never publish.
 
 The workflow uses GitHub's automatic token; no personal access token or extra secret is required. GitHub Actions must be enabled for the repository.
 
