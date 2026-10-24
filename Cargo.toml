@@ -1,0 +1,9 @@
+[workspace]
+members = ["native", "proxy"]
+resolver = "2"
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+[patch.crates-io]
+hudhook = { path = "native/vendor/hudhook-0.6.5" }

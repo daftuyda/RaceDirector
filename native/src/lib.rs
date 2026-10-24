@@ -1,0 +1,15 @@
+mod camera_motion;
+mod capture;
+mod design;
+mod framerate;
+mod graphics;
+mod hooks;
+mod il2cpp;
+mod model;
+mod overlay;
+mod runtime;
+mod state;
+mod timing;
+mod visual;
+use hudhook::hooks::dx11::ImguiDx11Hooks;
+hudhook::hudhook!(ImguiDx11Hooks, overlay::Panel::new());

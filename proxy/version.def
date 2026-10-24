@@ -1,0 +1,23 @@
+; RaceDirector: static forwarders to a local copy of the genuine Windows DLL.
+EXPORTS
+    GetFileVersionInfoA       = racedirector_version.GetFileVersionInfoA
+    GetFileVersionInfoExA     = racedirector_version.GetFileVersionInfoExA
+    GetFileVersionInfoExW     = racedirector_version.GetFileVersionInfoExW
+    GetFileVersionInfoSizeA   = racedirector_version.GetFileVersionInfoSizeA
+    GetFileVersionInfoSizeExA = racedirector_version.GetFileVersionInfoSizeExA
+    GetFileVersionInfoSizeExW = racedirector_version.GetFileVersionInfoSizeExW
+    GetFileVersionInfoSizeW   = racedirector_version.GetFileVersionInfoSizeW
+    GetFileVersionInfoW       = racedirector_version.GetFileVersionInfoW
+    VerFindFileA              = racedirector_version.VerFindFileA
+    VerFindFileW              = racedirector_version.VerFindFileW
+    VerInstallFileA           = racedirector_version.VerInstallFileA
+    VerInstallFileW           = racedirector_version.VerInstallFileW
+    VerLanguageNameA          = racedirector_version.VerLanguageNameA
+    VerLanguageNameW          = racedirector_version.VerLanguageNameW
+    VerQueryValueA            = racedirector_version.VerQueryValueA
+    VerQueryValueW            = racedirector_version.VerQueryValueW
+    ; Local exports (our own Rust fns in lib.rs). A .def EXPORTS section is the
+    ; authoritative export list, so these must be named here or they won't be
+    ; exported at all.
+    UnityMain
+    UnityMain2

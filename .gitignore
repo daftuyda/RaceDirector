@@ -1,0 +1,11 @@
+/target/
+/dist/
+/diagnostics/
+/releases/
+*.log
+*.pdb
+*.dmp
+*.backup-*
+racedirector-settings.json
+.env
+.env.*
