@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TowerSettings {
+    pub show_trainers: bool,
+    pub trainer_names: std::collections::BTreeMap<i32, String>,
     pub speed: bool,
     pub metres_per_second: bool,
     pub interval: bool,
@@ -15,6 +17,8 @@ pub struct TowerSettings {
 impl Default for TowerSettings {
     fn default() -> Self {
         Self {
+            show_trainers: false,
+            trainer_names: std::collections::BTreeMap::new(),
             speed: true,
             metres_per_second: false,
             interval: false,
@@ -28,6 +32,14 @@ impl Default for TowerSettings {
 }
 impl TowerSettings {
     pub fn sanitize(&mut self) {
+        self.trainer_names.retain(|gate, name| {
+            *name = name
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(64)
+                .collect::<String>();
+            (1..=64).contains(gate)
+        });
         fn bound(v: f32, default: f32, low: f32, high: f32) -> f32 {
             if v.is_finite() {
                 v.clamp(low, high)
@@ -92,8 +104,36 @@ pub fn gap(rows: &[Runner], index: usize, interval: bool, seconds: bool) -> Opti
         Some(delta.max(0.))
     }
 }
+pub fn trainer_label<'a>(settings: &'a TowerSettings, runner: &Runner) -> Option<&'a str> {
+    settings
+        .show_trainers
+        .then(|| settings.trainer_names.get(&runner.gate))
+        .flatten()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+}
+fn row_height(settings: &TowerSettings, runner: &Runner) -> f32 {
+    if trainer_label(settings, runner).is_some() {
+        48.
+    } else {
+        32.
+    }
+}
+fn tower_height(settings: &TowerSettings, rows: &[Runner]) -> f32 {
+    80. + rows.iter().map(|r| row_height(settings, r)).sum::<f32>()
+}
+fn fit_text(ui: &hudhook::imgui::Ui, value: &str, width: f32) -> String {
+    if ui.calc_text_size(value)[0] <= width {
+        return value.into();
+    }
+    let mut text = value.to_owned();
+    while !text.is_empty() && ui.calc_text_size(&format!("{text}..."))[0] > width {
+        text.pop();
+    }
+    format!("{text}...")
+}
 pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, selected: i32) {
-    use hudhook::imgui::{Condition, WindowFlags};
+    use hudhook::imgui::{Condition, StyleColor, WindowFlags};
     if rows.is_empty() {
         return;
     }
@@ -103,7 +143,7 @@ pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, 
     }
     let count = rows.len();
     let logical_width = if settings.speed { 480. } else { 400. };
-    let logical_height = 90. + count as f32 * 30.;
+    let logical_height = tower_height(settings, rows);
     let scale = settings
         .scale
         .min((display[0] - 24.) / logical_width)
@@ -117,6 +157,8 @@ pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, 
         12.
     };
     let y = 12. + (display[1] - height - 24.).max(0.) * settings.vertical;
+    let dark = ui.style_color(StyleColor::WindowBg)[0] < 0.5;
+    let accent = ui.style_color(StyleColor::SliderGrab);
     let _padding = ui.push_style_var(hudhook::imgui::StyleVar::WindowPadding([0., 0.]));
     let _border = ui.push_style_var(hudhook::imgui::StyleVar::WindowBorderSize(0.));
     ui.window("##race_timing_tower")
@@ -136,16 +178,11 @@ pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, 
         .build(|| {
             ui.set_window_font_scale(scale);
             let d = ui.get_window_draw_list();
-            let white = [0.93, 0.95, 1., 1.];
-            let muted = [0.58, 0.64, 0.75, 1.];
-            let accent = crate::design::ACCENT;
-            let gold = [0.96, 0.78, 0.44, 1.];
+            let white = [0.96, 0.97, 0.99, 1.];
+            let muted = [0.74, 0.78, 0.84, 1.];
             let point = |dx: f32, dy: f32| [x + dx * scale, y + dy * scale];
-            let rect = |l: f32, t: f32, r: f32, b: f32, c: [f32; 4], round: f32| {
-                d.add_rect(point(l, t), point(r, b), c)
-                    .rounding(round * scale)
-                    .filled(true)
-                    .build();
+            let rect = |l: f32, t: f32, r: f32, b: f32, c: [f32; 4]| {
+                d.add_rect(point(l, t), point(r, b), c).filled(true).build();
             };
             let text = |dx: f32, dy: f32, c: [f32; 4], s: &str| d.add_text(point(dx, dy), c, s);
             let right = |dx: f32, dy: f32, c: [f32; 4], s: &str| {
@@ -156,32 +193,14 @@ pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, 
                 )
             };
             let alpha = settings.opacity;
-            rect(
-                0.,
-                0.,
-                logical_width,
-                logical_height,
-                [0.035, 0.045, 0.065, alpha],
-                8.,
-            );
-            rect(
-                0.,
-                0.,
-                logical_width,
-                3.,
-                [accent[0], accent[1], accent[2], alpha],
-                0.,
-            );
-            text(14., 13., white, "RACE ORDER");
-            right(
-                logical_width - 14.,
-                13.,
-                accent,
-                &format!("{} RUNNERS", count),
-            );
+            // The tower always uses translucent dark strips for readability over the track.
+            // Light mode distinguishes the leader with an off-white strip; no outer panel.
+            rect(0., 0., logical_width, 78., [0.075, 0.09, 0.115, alpha]);
+            text(14., 10., white, "RACE ORDER");
+            right(logical_width - 14., 10., muted, &format!("{count} RUNNERS"));
             text(
                 14.,
-                38.,
+                32.,
                 muted,
                 if settings.interval {
                     "INTERVAL / RUNNER AHEAD"
@@ -189,14 +208,14 @@ pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, 
                     "GAP / RACE LEADER"
                 },
             );
-            text(14., 65., muted, "POS");
-            text(92., 65., muted, "RUNNER");
+            text(14., 56., muted, "POS");
+            text(62., 56., muted, "RUNNER");
             let gap_right = logical_width - 14.;
             let speed_right = logical_width - 112.;
             if settings.speed {
                 right(
                     speed_right,
-                    65.,
+                    56.,
                     muted,
                     if settings.metres_per_second {
                         "M/S"
@@ -207,7 +226,7 @@ pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, 
             }
             right(
                 gap_right,
-                65.,
+                56.,
                 muted,
                 if settings.estimated_seconds {
                     "EST. S"
@@ -215,60 +234,60 @@ pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, 
                     "GAP M"
                 },
             );
+            let mut top = 80.;
             for (i, r) in rows.iter().enumerate() {
-                let top = 87. + i as f32 * 30.;
+                let h = row_height(settings, r);
                 let tracked = r.gate == selected;
-                let color = if tracked {
-                    [0.20, 0.26, 0.43, alpha]
-                } else if i % 2 == 0 {
-                    [0.075, 0.09, 0.13, alpha]
+                let leader = i == 0;
+                let light_leader = leader && !tracked && !dark;
+                let bg = if tracked {
+                    [accent[0], accent[1], accent[2], alpha.max(0.9)]
+                } else if light_leader {
+                    [0.96, 0.955, 0.94, alpha.max(0.9)]
+                } else if leader {
+                    [0.21, 0.24, 0.29, alpha]
                 } else {
-                    [0.055, 0.068, 0.10, alpha]
+                    [0.075, 0.09, 0.115, alpha]
                 };
-                rect(5., top, logical_width - 5., top + 28., color, 3.);
-                if tracked {
-                    rect(5., top + 4., 8., top + 24., accent, 1.);
-                }
-                let leader = r.rank == Some(1);
-                rect(
-                    12.,
-                    top + 3.,
-                    42.,
-                    top + 25.,
-                    if leader {
-                        [0.40, 0.30, 0.14, alpha]
-                    } else {
-                        [0.14, 0.17, 0.23, alpha]
-                    },
-                    3.,
-                );
-                let rank = r.rank.map(|v| v.to_string()).unwrap_or_else(|| "--".into());
-                let tw = ui.calc_text_size(&rank)[0] / scale;
-                text(
-                    27. - tw / 2.,
-                    top + 5.,
-                    if leader { gold } else { white },
-                    &rank,
-                );
-                text(54., top + 5., muted, &format!("{:02}", r.gate));
+                let fg = if light_leader {
+                    [0.08, 0.10, 0.14, 1.]
+                } else {
+                    white
+                };
+                let secondary = if light_leader {
+                    [0.31, 0.35, 0.40, 1.]
+                } else if tracked {
+                    [0.92, 0.95, 1., 1.]
+                } else {
+                    muted
+                };
+                rect(0., top, logical_width, top + h, bg);
+                d.add_line(
+                    point(0., top + h),
+                    point(logical_width, top + h),
+                    [0.65, 0.70, 0.78, alpha * 0.3],
+                )
+                .build();
+                let name_x = 62.;
                 let name_end = if settings.speed {
                     logical_width - 180.
                 } else {
                     logical_width - 104.
                 };
-                let max_name = (name_end - 92.) * scale;
-                let mut label = r.name.clone();
-                if ui.calc_text_size(&label)[0] > max_name {
-                    while !label.is_empty()
-                        && ui.calc_text_size(&format!("{label}..."))[0] > max_name
-                    {
-                        label.pop();
-                    }
-                    label.push_str("...");
+                let text_y = top + if h > 32. { 4. } else { 6. };
+                let numeric_y = top + (h - 18.) * 0.5;
+                let rank = r.rank.map(|v| v.to_string()).unwrap_or_else(|| "--".into());
+                text(14., numeric_y, fg, &rank);
+                let label = fit_text(ui, &r.name, (name_end - name_x) * scale);
+                text(name_x, text_y, fg, &label);
+                if let Some(trainer) = trainer_label(settings, r) {
+                    ui.set_window_font_scale(scale * 0.82);
+                    let label = fit_text(ui, trainer, (name_end - name_x) * scale);
+                    text(name_x, top + 26., secondary, &label);
+                    ui.set_window_font_scale(scale);
                 }
-                text(92., top + 5., if tracked { accent } else { white }, &label);
                 if settings.speed {
-                    let value = r
+                    let v = r
                         .speed
                         .map(|v| {
                             format!(
@@ -281,21 +300,17 @@ pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, 
                             )
                         })
                         .unwrap_or_else(|| "--".into());
-                    right(speed_right, top + 5., muted, &value);
+                    right(speed_right, numeric_y, fg, &v);
                 }
-                let value = if i == 0 {
+                let v = if i == 0 {
                     "LEADER".into()
                 } else {
                     gap(rows, i, settings.interval, settings.estimated_seconds)
                         .map(|v| format!("+{v:.1}"))
                         .unwrap_or_else(|| "--".into())
                 };
-                right(
-                    gap_right,
-                    top + 5.,
-                    if leader { gold } else { white },
-                    &value,
-                );
+                right(gap_right, numeric_y, fg, &v);
+                top += h;
             }
         });
 }
@@ -402,6 +417,56 @@ mod layout_tests {
                 }
             }
             assert!(!ctx.io().want_capture_mouse);
+        }
+    }
+}
+
+#[cfg(test)]
+mod trainer_tests {
+    use super::*;
+    fn runner(gate: i32) -> Runner {
+        Runner {
+            gate,
+            name: "Tokai Teio".into(),
+            rank: Some(1),
+            distance: Some(100.),
+            speed: Some(20.),
+        }
+    }
+    #[test]
+    fn labels_follow_gate_not_position_and_blank_rows_stay_compact() {
+        let mut settings = TowerSettings::default();
+        settings.show_trainers = true;
+        settings.trainer_names.insert(3, "MaybeVoid".into());
+        assert_eq!(trainer_label(&settings, &runner(3)), Some("MaybeVoid"));
+        assert_eq!(trainer_label(&settings, &runner(1)), None);
+        assert_eq!(row_height(&settings, &runner(3)), 48.);
+        assert_eq!(row_height(&settings, &runner(1)), 32.);
+        settings.show_trainers = false;
+        assert_eq!(row_height(&settings, &runner(3)), 32.);
+    }
+    #[test]
+    fn trainer_settings_round_trip_sanitize_and_full_field_fits() {
+        let mut settings: TowerSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.show_trainers);
+        settings.show_trainers = true;
+        for gate in 1..=18 {
+            settings
+                .trainer_names
+                .insert(gate, "  Trainer\nName  ".into());
+        }
+        settings.trainer_names.insert(99, "Bad gate".into());
+        settings.sanitize();
+        assert!(!settings.trainer_names.contains_key(&99));
+        assert_eq!(trainer_label(&settings, &runner(1)), Some("TrainerName"));
+        let loaded: TowerSettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(loaded.trainer_names, settings.trainer_names);
+        let rows = (1..=18).map(runner).collect::<Vec<_>>();
+        let h = tower_height(&loaded, &rows);
+        for screen_height in [480., 720., 1080.] {
+            let scale = ((screen_height - 24.) / h).min(1.);
+            assert!(h * scale <= screen_height - 23.9);
         }
     }
 }

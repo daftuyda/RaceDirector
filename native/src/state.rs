@@ -37,7 +37,7 @@ pub fn state() -> &'static Mutex<State> {
     S.get_or_init(|| Mutex::new(State::from_settings(load())))
 }
 impl State {
-    fn from_settings(settings: Settings) -> Self {
+    pub(crate) fn from_settings(settings: Settings) -> Self {
         let enabled = settings.enabled.clone();
         Self {
             settings,

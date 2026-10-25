@@ -2,11 +2,11 @@
 
 ## Requirements
 
-Windows x64, Steam Global Umamusume, and access to this private repository. Close the game before installing, updating or disabling RaceDirector.
+Windows x64 and Steam Global Umamusume. Close the game before installing, updating or disabling RaceDirector.
 
 ## Install
 
-1. Download **RaceDirector-v0.1.17-win64.zip** from Releases and extract it to a separate folder. GitHub's source-code ZIP does not contain the built plugin.
+1. Download **RaceDirector-v0.1.18-windows-x64.zip** from Releases and extract it to a separate folder. GitHub's source-code ZIP does not contain the built plugin.
 2. In Steam, choose the game's **Manage > Browse local files**. Use the folder containing **UmamusumePrettyDerby.exe**.
 3. Open PowerShell in the extracted release folder and run, replacing the path:
 
@@ -72,3 +72,7 @@ To uninstall, close the game and remove only the three RaceDirector-installed fi
 - **Low FPS:** reduce supersampling/MSAA and disable overhead views.
 
 Report the plugin/game versions, other mods, reproduction steps and relevant log lines. Remove personal information from logs before sharing.
+
+## Airframe (v0.1.18)
+
+Use the Light / Dark buttons at the top of the panel. Both theme and feature choices save automatically. Help contains Save settings now. Tower > Trainers provides optional manual names by gate; clear or review names when switching races. No automatic trainer lookup is claimed.

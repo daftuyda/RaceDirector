@@ -4,10 +4,9 @@ Race camera and broadcast overlay for **Umamusume: Pretty Derby — Steam Global
 
 [Download the latest release](https://github.com/daftuyda/RaceDirector/releases/latest) · [Installation instructions](docs/INSTALLATION.md)
 
-This repository is private. Sign into an account with repository access to download releases.
-
 ## Features
 
+- Airframe inspector with saved light/dark appearance, top navigation and collapsible camera controls.
 - Follow camera and pack-relative freecam, smoothing, target transitions and a ground-height guard.
 - Selective HUD, photo button, skill popup/sidebar and character-marker hiding.
 - Unique-cutin, speed-line, overhead-view and tree suppression options.
@@ -40,13 +39,13 @@ Launch the game, enter a race and press **Insert**. Use **Update-RaceDirector.ps
 | Shift / Ctrl | Freecam fast / slow movement |
 | [ / ] | Switch runner |
 
-Settings save automatically approximately once per second when changed under `%LOCALAPPDATA%\RaceDirector\settings.json`. **Save settings** writes immediately. F10 also remembers the disabled state. Cursor capture remains manual.
+Settings save automatically approximately once per second when changed under `%LOCALAPPDATA%\RaceDirector\settings.json`. **Help > Save settings now** writes immediately. F10 also remembers the disabled state. Cursor capture remains manual.
 
 ## Compatibility
 
 The owner confirmed Hachimi coexistence on their installation. The installer never overwrites another mod's version.dll. Avoid simultaneous camera control by multiple mods. Other combinations and future game versions may require changes.
 
-Version 0.1.17 passed 41 automated tests. Native graphics allocation was checked in the running engine; full race-image acceptance across tracks and graphics settings remains incomplete. A 60 FPS request does not guarantee that frame rate under GPU load.
+Version 0.1.18 passed 44 automated tests. Native graphics allocation was checked in the running engine; full race-image acceptance across tracks and graphics settings remains incomplete. A 60 FPS request does not guarantee that frame rate under GPU load.
 
 ## Build
 
@@ -62,7 +61,7 @@ Output is in `dist`. Dependencies must be available locally or downloadable.
 
 GitHub Actions tests and builds Windows x64 packages on pushes to main, pull requests to main, and manual runs from the Actions tab. Download the ZIP and SHA-256 checksum from the run's RaceDirector-windows-x64 artifact (retained for 14 days).
 
-After a successful push to main, Actions reads the version from `native/Cargo.toml`, automatically creates its tag (for example, v0.1.17) at the built commit, and publishes the install ZIP, checksum, and generated release notes. No manual tag command is needed. A manual workflow run on main also publishes.
+After a successful push to main, Actions reads the version from `native/Cargo.toml`, automatically creates its tag (for example, v0.1.18) at the built commit, and publishes the install ZIP, checksum, and generated release notes. No manual tag command is needed. A manual workflow run on main also publishes.
 
 For the next release, update the version in `native/Cargo.toml`, run `cargo check --workspace` to update Cargo.lock, then commit and push both files with your changes. Version numbers are not automatically incremented.
 
@@ -75,3 +74,11 @@ The workflow uses GitHub's automatic token; no personal access token or extra se
 ## License
 
 Licensed under the [MIT License](LICENSE).
+
+## Airframe appearance and trainer labels (0.1.18)
+
+Choose **Light** or **Dark** at the top of the panel. The preference saves automatically. Airframe uses top navigation and collapsible Mode, Framing and Motion controls; Capture (F8) and Restore (F10) stay in the footer. An immediate **Save settings now** action is under Help.
+
+Under **Tower > Trainers**, enable **Show trainer names** and enter names by gate. Names appear on a smaller second line; blank names keep compact rows. Names are manual in this release; automatic trainer lookup has not been verified. Labels persist by gate, so review them for each new race or use Clear trainer names. The tower scales to fit a full field.
+
+Validation: 44 automated tests pass; actual ImGui previews were rendered and inspected in both themes with 18 named runners. In-game appearance after installation still needs checking.

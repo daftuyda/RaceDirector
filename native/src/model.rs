@@ -59,6 +59,7 @@ pub struct Shot {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub dark_mode: bool,
     pub enabled: Enabled,
     pub tower: crate::timing::TowerSettings,
     pub fps_60: bool,
@@ -75,6 +76,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            dark_mode: false,
             enabled: Enabled::default(),
             tower: crate::timing::TowerSettings::default(),
             fps_60: true,
@@ -473,4 +475,18 @@ pub struct Enabled {
     pub clean_effects: bool,
     pub graphics: bool,
     pub graphics_applied: crate::graphics::Quality,
+}
+
+#[cfg(test)]
+mod appearance_tests {
+    use super::*;
+    #[test]
+    fn legacy_defaults_to_light_and_dark_preference_round_trips() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.dark_mode);
+        settings.dark_mode = true;
+        let loaded: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(loaded.dark_mode);
+    }
 }

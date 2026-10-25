@@ -67,6 +67,11 @@ impl ImguiRenderLoop for Panel {
     }
 
     fn before_render(&mut self, ctx: &mut hudhook::imgui::Context) {
+        let dark = state()
+            .lock()
+            .map(|s| s.settings.dark_mode)
+            .unwrap_or(false);
+        crate::design::apply_theme(ctx, dark);
         let locked = state()
             .lock()
             .map(|s| crate::capture::active(s.capture, s.camera, s.race, focused()))
@@ -246,80 +251,96 @@ impl ImguiRenderLoop for Panel {
             return;
         }
 
+        self.draw_settings(ui, &mut s);
+    }
+}
+
+impl Panel {
+    fn draw_settings(&mut self, ui: &Ui, s: &mut crate::state::State) {
         let display = ui.io().display_size;
-        ui.window("RaceDirector Studio")
-            .size([940_f32.min(display[0] - 24.).max(320.), 760_f32.min(display[1] - 24.).max(300.)], Condition::FirstUseEver)
+        ui.window("RaceDirector Airframe")
+            .flags(hudhook::imgui::WindowFlags::NO_TITLE_BAR)
+            .size([600_f32.min(display[0] - 24.).max(280.), 820_f32.min(display[1] - 24.).max(300.)], Condition::FirstUseEver)
             .position([12., 12.], Condition::FirstUseEver)
             .build(|| {
-                ui.text_colored(crate::design::ACCENT, "RACE DIRECTOR  /  STUDIO");
-                ui.same_line();
-                ui.text_disabled(format!("v{}  /  {:.0} FPS", env!("CARGO_PKG_VERSION"), ui.io().framerate));
-                ui.text_colored(if s.race { [0.46,0.84,0.70,1.] } else { crate::design::MUTED }, if s.race { "CONNECTED   /   Race camera & broadcast controls" } else { "STANDBY   /   Enter a race to connect" });
+                ui.text("RACE DIRECTOR");
+                let available = ui.content_region_avail()[0];
+                if available > 370. { ui.same_line_with_pos(available - 142.); }
+                for (label, dark) in [("Light", false), ("Dark", true)] {
+                    if label == "Dark" { ui.same_line(); }
+                    let selected = s.settings.dark_mode == dark;
+                    let _button = ui.push_style_color(StyleColor::Button, if selected {ui.style_color(StyleColor::SliderGrab)} else {ui.style_color(StyleColor::FrameBg)});
+                    let _text = ui.push_style_color(StyleColor::Text, if selected {[1.,1.,1.,1.]} else {ui.style_color(StyleColor::Text)});
+                    if ui.button_with_size(label,[62.,28.]) { s.settings.dark_mode = dark; }
+                }
+                ui.text_disabled(format!("{}   /   {:.0} FPS   /   v{}", if s.race {"IN RACE"} else {"STANDBY"}, ui.io().framerate,env!("CARGO_PKG_VERSION")));
                 ui.separator();
-                ui.child_window("navigation").size([166., -76.]).build(|| {
-                    crate::design::section(ui, "WORKSPACE");
-                    for (i, label) in ["Camera", "Visuals", "Saved shots", "Performance", "Timing tower", "Help"].iter().enumerate() {
-                        if ui.selectable_config(format!("{:02}   {}", i+1, label)).selected(self.page == i).size([0., 42.]).build() {
-                            self.page = i;
-                        }
-                    }
-                    ui.separator();
-                    crate::design::section(ui, "SHORTCUTS");
-                    ui.text("Insert  Panel");
-                    ui.text("F6  Camera");
-                    ui.text("F7  Custom UI");
-                    ui.text("F8  Clean lock");
-                    ui.text("F10 Restore");
-                });
-                ui.same_line();
-                ui.child_window("page").size([0., -76.]).build(|| {
+                let labels = ["Camera", "Visuals", "Shots", "Perf", "Tower", "Help"];
+                let columns = if ui.content_region_avail()[0] < 430. {3} else {6};
+                let tab_width = (ui.content_region_avail()[0] - (columns - 1) as f32 * 6.) / columns as f32;
+                for (i, label) in labels.iter().enumerate() {
+                    if i % columns != 0 {ui.same_line_with_spacing(0.,6.);}
+                    let selected = self.page == i;
+                    let p = ui.cursor_screen_pos();
+                    let _bg = ui.push_style_color(StyleColor::Button,[0.,0.,0.,0.]);
+                    let _text = ui.push_style_color(StyleColor::Text,ui.style_color(if selected {StyleColor::SliderGrab}else{StyleColor::TextDisabled}));
+                    if ui.button_with_size(label,[tab_width,36.]) {self.page=i;}
+                    if selected {ui.get_window_draw_list().add_line([p[0],p[1]+35.],[p[0]+tab_width,p[1]+35.],ui.style_color(StyleColor::SliderGrab)).thickness(2.).build();}
+                }
+                ui.spacing();
+                ui.child_window("page").size([0., -92.]).build(|| {
                     let _width = ui.push_item_width(-1.);
                     match self.page {
                         0 => {
-                            heading(ui, "Camera", "Frame the race. Follow a runner, then refine your shot.");
-                            option(ui, "Camera control  [F6]", "Take control of race framing and runner tracking.", &mut s.camera);
-                            ui.separator();
-                            if crate::design::toggle(ui, "Free camera", "Fly freely around the pack. Turn off to follow a runner.", &mut s.freecam) { s.free_pose = None; }
-                            if s.freecam {
-                                ui.text_wrapped("WASD flies in the viewing direction. Q/E moves vertically. Shift boosts speed; Ctrl slows it. Right-drag looks around. F8 locks the cursor for mouse-look without holding a button.");
-                                ui.text("Flight speed"); ui.slider("##flyspeed",0.5,150.,&mut s.settings.free_speed);
-                                if let Some(free) = &mut s.free_pose {
-                                    ui.text("Field of view"); ui.slider("##freefov",5.,100.,&mut free.fov);
+                            if ui.collapsing_header("Mode", hudhook::imgui::TreeNodeFlags::DEFAULT_OPEN) {
+                                option(ui, "Camera control  [F6]", "", &mut s.camera);
+                                let old_freecam = s.freecam;
+                                crate::design::choice(ui, "##camera-mode", "Follow", "Freecam", &mut s.freecam);
+                                if old_freecam != s.freecam { s.free_pose = None; }
+                                if !s.freecam {
+                                    let preview = s.timing_rows.iter().find(|r| r.gate == s.gate)
+                                        .map(|r|format!("Gate {:02}  {}",r.gate,r.name)).unwrap_or_else(||format!("Gate {:02}",s.gate));
+                                    if let Some(_combo) = ui.begin_combo("##followrunner", &preview) {
+                                        for gate in s.gates.clone() {
+                                            let label = s.timing_rows.iter().find(|r|r.gate==gate)
+                                                .map(|r|format!("Gate {gate:02}  {}",r.name)).unwrap_or_else(||format!("Gate {gate:02}"));
+                                            if ui.selectable_config(&label).selected(s.gate==gate).build(){s.gate=gate;}
+                                        }
+                                    }
+                                    if s.gates.is_empty(){ui.text_disabled("Enter a race to choose a runner.");}
+                                } else {
+                                    ui.text_wrapped("WASD + Q/E to fly. Shift boosts; Ctrl slows. Right-drag looks around; F8 locks mouse-look.");
                                 }
-                                if ui.button("Reset freecam from orbit framing") { s.free_pose = None; }
-                            } else {
-                            ui.text("Follow runner");
-                            if s.gates.is_empty() { ui.text_disabled("Runner selection appears during a race."); }
-                            let gates = s.gates.clone();
-                            let columns = ((ui.content_region_avail()[0] + 10.) / 52.).floor().max(1.) as usize;
-                            for (i, gate) in gates.iter().enumerate() {
-                                if i % columns != 0 { ui.same_line(); }
-                                let selected = *gate == s.gate;
-                                let _color = selected.then(|| ui.push_style_color(StyleColor::Button, [0.35, 0.42, 0.64, 1.]));
-                                if ui.button_with_size(format!("{gate}"), [42., 32.]) { s.gate = *gate; }
                             }
                             ui.spacing();
-                            ui.text("Orbit"); ui.slider("##orbit", -3.14159, 3.14159, &mut s.settings.pose.yaw);
-                            ui.text("Pitch"); ui.slider("##pitch", -1.2, 1.4, &mut s.settings.pose.pitch);
-                            ui.text("Distance"); ui.slider("##distance", 2., 200., &mut s.settings.pose.distance);
-                            ui.text("Height"); ui.slider("##height", -1., 20., &mut s.settings.pose.height);
-                            ui.text("Field of view"); ui.slider("##fov", 5., 80., &mut s.settings.pose.fov);
+                            if ui.collapsing_header("Framing", hudhook::imgui::TreeNodeFlags::DEFAULT_OPEN) {
+                                if s.freecam {
+                                    inspector_slider(ui,"Flight speed",0.5,150.,&mut s.settings.free_speed);
+                                    if let Some(free) = &mut s.free_pose { inspector_slider(ui,"Field of view",5.,100.,&mut free.fov); }
+                                } else {
+                                    inspector_slider(ui,"Field of view",5.,80.,&mut s.settings.pose.fov);
+                                    inspector_slider(ui,"Distance",2.,200.,&mut s.settings.pose.distance);
+                                    inspector_slider(ui,"Height",-1.,20.,&mut s.settings.pose.height);
+                                    if ui.collapsing_header("Orbit & pitch", hudhook::imgui::TreeNodeFlags::empty()) {
+                                        inspector_slider(ui,"Orbit",-std::f32::consts::PI,std::f32::consts::PI,&mut s.settings.pose.yaw);
+                                        inspector_slider(ui,"Pitch",-1.2,1.4,&mut s.settings.pose.pitch);
+                                    }
+                                }
+                                if ui.button("Reset framing") { s.settings.pose = Pose::default(); s.free_pose = None; }
                             }
-                            ui.separator();
-                            crate::design::section(ui, "CAMERA MOTION");
-                            ui.text("Target switch duration (seconds)"); ui.slider("##targettransition",0.,3.,&mut s.settings.target_transition);
-                            ui.text_wrapped("Ease between runners without falling behind the pack. Set to zero for instant switching.");
-                            ui.text("Minimum ground clearance"); ui.slider("##groundclearance",0.15,3.,&mut s.settings.ground_clearance);
-                            ui.text_wrapped("Keeps follow camera and freecam above the sampled course surface.");
-                            ui.text_wrapped(&s.ground_status);
-                            ui.text("Smoothing response"); ui.slider("##response", 0.5, 30., &mut s.settings.response);
-                            ui.text_disabled("Lower values give smoother movement, look and zoom in both camera modes.");
-                            ui.text("Mouse sensitivity"); ui.slider("##sensitivity", 0.001, 0.02, &mut s.settings.mouse_sensitivity);
-                            if ui.button("Reset framing") { s.settings.pose = Pose::default(); s.free_pose = None; }
-                            ui.separator();
-                            ui.text_wrapped("F8 clean capture closes and locks this panel, hides the cursor and enables mouse-look. F8, Escape or F10 releases it; Insert opens settings afterwards.");
-                            ui.text_wrapped(&s.capture_status);
-                            if ui.button("Start clean capture  [F8]") && s.camera && s.race && crate::capture::available() { s.capture = true; self.open = false; }
+                            ui.spacing();
+                            if ui.collapsing_header("Motion", hudhook::imgui::TreeNodeFlags::DEFAULT_OPEN) {
+                                inspector_slider(ui,"Smoothing response",0.5,30.,&mut s.settings.response);
+                                inspector_slider(ui,"Target transition (s)",0.,3.,&mut s.settings.target_transition);
+                                inspector_slider(ui,"Ground clearance",0.15,3.,&mut s.settings.ground_clearance);
+                                ui.text_wrapped("Lower response gives smoother motion. Zero transition switches targets instantly.");
+                                if ui.collapsing_header("Advanced motion", hudhook::imgui::TreeNodeFlags::empty()) {
+                                    inspector_slider(ui,"Mouse sensitivity",0.001,0.02,&mut s.settings.mouse_sensitivity);
+                                    ui.text_wrapped(&s.ground_status);
+                                }
+                            }
+                            ui.spacing();
+                            ui.text_wrapped("F8 hides the cursor and settings. F8 or Escape releases capture.");
                         }
                         1 => {
                             heading(ui, "Visuals", "Keep the shot clear. Each option works independently.");
@@ -386,7 +407,7 @@ impl ImguiRenderLoop for Panel {
                         }
                         3 => {
                             heading(ui, "Performance", "A smoother view for racing and recording.");
-                            ui.text_colored([0.64, 0.70, 1., 1.], format!("{:.0} FPS", ui.io().framerate));
+                            ui.text_colored(ui.style_color(StyleColor::SliderGrab), format!("{:.0} FPS", ui.io().framerate));
                             ui.text_disabled(format!("{:.1} ms / frame", 1000. / ui.io().framerate.max(1.)));
                             ui.spacing();
                             option(ui, "Enable 60 FPS", "Request 60 FPS across the game. Enabled by default.", &mut s.settings.fps_60);
@@ -419,6 +440,23 @@ impl ImguiRenderLoop for Panel {
                             option(ui, "Timing tower", "A clean broadcast overlay for every runner in the field.", &mut s.tower);
                             ui.text_wrapped("The tower stays visible with settings closed and during F8 clean capture. It is included in game captures and never takes mouse input. F10 hides it.");
                             ui.separator();
+                            crate::design::section(ui, "TRAINERS");
+                            option(ui, "Show trainer names", "An optional second line beneath each runner.", &mut s.settings.tower.show_trainers);
+                            ui.text_wrapped("Add trainer names by gate below. These labels are saved by gate, so review them when changing races. Automatic trainer lookup is not available yet.");
+                            if ui.button("Clear trainer names") { s.settings.tower.trainer_names.clear(); }
+                            ui.child_window("trainer_names").size([0.,190.]).build(|| {
+                                let gates = if s.gates.is_empty() {(1..=18).collect::<Vec<i32>>()}else{s.gates.clone()};
+                                for gate in gates {
+                                    let _id = ui.push_id(format!("trainer_{gate}"));
+                                    let label = s.timing_rows.iter().find(|r|r.gate==gate).map(|r|format!("Gate {gate:02}  {}",r.name)).unwrap_or_else(||format!("Gate {gate:02}"));
+                                    ui.text(&label);
+                                    let mut value = s.settings.tower.trainer_names.get(&gate).cloned().unwrap_or_default();
+                                    if ui.input_text("##trainer", &mut value).hint("Trainer name (optional)").build() {
+                                        s.settings.tower.trainer_names.insert(gate,value);
+                                    }
+                                }
+                            });
+                            ui.separator();
                             crate::design::section(ui, "DATA & UNITS");
                             option(ui, "Speed column", "Show current race velocity alongside each runner.", &mut s.settings.tower.speed);
                             crate::design::choice(ui, "Speed units", "km/h", "m/s", &mut s.settings.tower.metres_per_second);
@@ -437,6 +475,7 @@ impl ImguiRenderLoop for Panel {
                         _ => {
                             heading(ui, "Help & status", "Controls stay available with the panel closed.");
                             for line in ["F8 / Clean capture lock (F8 or Escape releases)", "WASD + Q/E / Freecam flight", "Shift / Freecam boost; Ctrl / slow", "Right-drag  /  Orbit and pitch", "Mouse wheel  /  Zoom", "Arrow keys  /  Orbit and pitch", "Page Up / Down  /  Height", "[ and ]  /  Previous or next runner", "Shift  /  Fine keyboard movement", "F10  /  Restore camera and all visual hiding"] { ui.text(line); }
+                            if ui.button("Save settings now") {self.message = match save(&s.snapshot()) {Ok(()) => "Settings saved".into(),Err(e) => format!("Save failed: {e}")};}
                             ui.separator(); ui.text_wrapped(&s.status);
                             ui.text_wrapped(&s.visual_status); ui.text_wrapped(&s.fps_status);
                             ui.text_wrapped("Settings and enabled features are saved automatically every second when changed. F8 cursor capture remains manual. F10 restores visuals and remembers that choice.");
@@ -444,11 +483,13 @@ impl ImguiRenderLoop for Panel {
                     }
                 });
                 ui.separator();
-                if ui.button_with_size("Save settings", [150.,36.]) {
-                    self.message = match save(&s.snapshot()) { Ok(()) => "Settings saved".into(), Err(e) => format!("Save failed: {e}") };
+                let footer_width = (ui.content_region_avail()[0] - 10.) * 0.5;
+                if ui.button_with_size("Capture  [F8]", [footer_width,34.]) {
+                    if s.camera && s.race && crate::capture::available() { s.capture = true; self.open = false; }
+                    else { self.message = "Enable camera during a race to start capture.".into(); }
                 }
                 ui.same_line();
-                if ui.button_with_size("Restore visuals  [F10]", [220.,36.]) {
+                if ui.button_with_size("Restore  [F10]", [footer_width,34.]) {
                     s.capture = false; s.camera = false; s.hide_ui = false; s.hide_bottom = false; s.hide_skill_popups = false; s.hide_markers = false; s.skip_cutins = false; s.hide_speed_lines = false; s.hide_overhead = false; s.hide_trees = false; s.clean_effects = false; s.graphics = false; s.tower = false;
                 }
                 ui.text_wrapped(&self.message);
@@ -492,4 +533,90 @@ fn heading(ui: &Ui, title: &str, subtitle: &str) {
 }
 fn option(ui: &Ui, title: &str, description: &str, enabled: &mut bool) {
     crate::design::toggle(ui, title, description, enabled);
+}
+
+fn inspector_slider(ui: &Ui, label: &str, min: f32, max: f32, value: &mut f32) {
+    let _id = ui.push_id(label);
+    let start = ui.cursor_pos()[0];
+    let width = ui.content_region_avail()[0];
+    let label_width = if width > 420. { width * 0.42 } else { 0. };
+    ui.text(label);
+    if label_width > 0. {
+        ui.same_line_with_pos(start + label_width);
+    }
+    let slider_width = (width - label_width - 65.).max(70.);
+    let _width = ui.push_item_width(slider_width);
+    let p = ui.cursor_screen_pos();
+    let track = ui.style_color(StyleColor::Border);
+    let accent = ui.style_color(StyleColor::SliderGrab);
+    {
+        let _padding = ui.push_style_var(hudhook::imgui::StyleVar::FramePadding([4., 1.]));
+        let _a = ui.push_style_color(StyleColor::FrameBg, [0.; 4]);
+        let _b = ui.push_style_color(StyleColor::FrameBgHovered, [0.; 4]);
+        let _c = ui.push_style_color(StyleColor::FrameBgActive, [0.; 4]);
+        let _d = ui.push_style_color(StyleColor::SliderGrab, [0.; 4]);
+        let _e = ui.push_style_color(StyleColor::SliderGrabActive, [0.; 4]);
+        ui.slider_config("##value", min, max)
+            .display_format("")
+            .build(value);
+    }
+    let y = (ui.item_rect_min()[1] + ui.item_rect_max()[1]) * 0.5;
+    let left = p[0] + 7.;
+    let right = p[0] + slider_width - 7.;
+    let position = left + ((*value - min) / (max - min)).clamp(0., 1.) * (right - left);
+    let d = ui.get_window_draw_list();
+    d.add_line([left, y], [right, y], track)
+        .thickness(3.)
+        .build();
+    d.add_line([left, y], [position, y], accent)
+        .thickness(3.)
+        .build();
+    d.add_circle([position, y], 5.5, accent)
+        .filled(true)
+        .build();
+    if ui.is_item_focused() {
+        d.add_circle([position, y], 8., accent).build();
+    }
+    let value_text = if max <= 0.02 {
+        format!("{value:.3}")
+    } else {
+        format!("{value:.1}")
+    };
+    ui.same_line_with_pos(start + width - ui.calc_text_size(&value_text)[0]);
+    ui.text_disabled(value_text);
+}
+
+#[cfg(test)]
+pub(crate) fn draw_preview(ui: &Ui, dark: bool, rows: &[crate::timing::Runner]) {
+    let mut settings = crate::model::Settings::default();
+    settings.dark_mode = dark;
+    settings.tower.right = true;
+    settings.tower.show_trainers = true;
+    for r in rows {
+        settings.tower.trainer_names.insert(
+            r.gate,
+            if r.gate == 3 {
+                "MaybeVoid".into()
+            } else {
+                format!("Trainer {}", r.gate)
+            },
+        );
+    }
+    let mut s = crate::state::State::from_settings(settings);
+    s.race = true;
+    s.camera = true;
+    s.gate = 3;
+    s.gates = rows.iter().map(|r| r.gate).collect();
+    s.timing_rows = rows.to_vec();
+    crate::timing::draw(ui, rows, &s.settings.tower, s.gate);
+    let mut panel = Panel {
+        keys: ToggleKeys::default(),
+        autosave: crate::state::AutoSave::new(),
+        open: true,
+        filter: String::new(),
+        shot_name: String::new(),
+        message: "Settings saved automatically".into(),
+        page: 0,
+    };
+    panel.draw_settings(ui, &mut s);
 }

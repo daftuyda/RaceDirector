@@ -1,7 +1,6 @@
 //! Shared presentation helpers. No game or input ownership logic lives here.
 use hudhook::imgui::{StyleColor, Ui};
-pub const ACCENT: [f32; 4] = [0.64, 0.71, 1., 1.];
-pub const MUTED: [f32; 4] = [0.56, 0.62, 0.73, 1.];
+pub const ACCENT: [f32; 4] = [0.16, 0.36, 0.83, 1.];
 pub fn wrap(ui: &Ui, text: &str, width: f32) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
@@ -25,11 +24,11 @@ pub fn wrap(ui: &Ui, text: &str, width: f32) -> Vec<String> {
 }
 pub fn section(ui: &Ui, title: &str) {
     ui.spacing();
-    ui.text_colored(MUTED, title);
+    ui.text_colored(ui.style_color(StyleColor::TextDisabled), title);
     ui.spacing();
 }
 pub fn heading(ui: &Ui, title: &str, subtitle: &str) {
-    ui.text_colored(ACCENT, title);
+    ui.text_colored(ui.style_color(StyleColor::Text), title);
     ui.text_wrapped(subtitle);
     ui.spacing();
     ui.separator();
@@ -49,28 +48,27 @@ pub fn toggle(ui: &Ui, title: &str, description: &str, value: &mut bool) -> bool
     let hover = ui.is_item_hovered();
     let focus = ui.is_item_focused();
     let d = ui.get_window_draw_list();
-    d.add_rect(
-        p,
-        [p[0] + width, p[1] + height],
-        if hover {
-            [0.12, 0.15, 0.21, 1.]
-        } else {
-            [0.085, 0.10, 0.14, 1.]
-        },
-    )
-    .rounding(8.)
-    .filled(true)
-    .build();
-    d.add_rect(
-        p,
+    let accent = ui.style_color(StyleColor::SliderGrab);
+    let muted = ui.style_color(StyleColor::TextDisabled);
+    if hover {
+        d.add_rect(
+            p,
+            [p[0] + width, p[1] + height],
+            ui.style_color(StyleColor::FrameBgHovered),
+        )
+        .rounding(4.)
+        .filled(true)
+        .build();
+    }
+    d.add_line(
+        [p[0], p[1] + height],
         [p[0] + width, p[1] + height],
         if focus {
-            ACCENT
+            accent
         } else {
-            [0.18, 0.21, 0.29, 1.]
+            ui.style_color(StyleColor::Border)
         },
     )
-    .rounding(8.)
     .build();
     let mut label = title.to_owned();
     while !label.is_empty() && ui.calc_text_size(&label)[0] > width - 94. {
@@ -82,16 +80,20 @@ pub fn toggle(ui: &Ui, title: &str, description: &str, value: &mut bool) -> bool
         }
         label.push_str("...");
     }
-    d.add_text([p[0] + 14., p[1] + 12.], [0.93, 0.95, 1., 1.], label);
+    d.add_text(
+        [p[0] + 8., p[1] + 12.],
+        ui.style_color(StyleColor::Text),
+        label,
+    );
     let sx = p[0] + width - 62.;
     let sy = p[1] + 11.;
     d.add_rect(
         [sx, sy],
         [sx + 46., sy + 23.],
         if *value {
-            [0.45, 0.54, 0.87, 1.]
+            accent
         } else {
-            [0.22, 0.25, 0.33, 1.]
+            ui.style_color(StyleColor::FrameBgActive)
         },
     )
     .rounding(12.)
@@ -107,7 +109,7 @@ pub fn toggle(ui: &Ui, title: &str, description: &str, value: &mut bool) -> bool
     for (i, line) in lines.iter().enumerate() {
         d.add_text(
             [p[0] + 14., p[1] + 22. + line_h + i as f32 * (line_h + 2.)],
-            MUTED,
+            muted,
             line,
         );
     }
@@ -120,8 +122,10 @@ fn label_truncated(ui: &Ui, title: &str, width: f32) -> bool {
     ui.calc_text_size(title)[0] > width
 }
 pub fn choice(ui: &Ui, label: &str, left: &str, right: &str, value: &mut bool) {
-    let _id = ui.push_id(label);
-    ui.text_colored(MUTED, label);
+    let _id = ui.push_id(if label.is_empty() { "##choice" } else { label });
+    if !label.is_empty() && !label.starts_with("##") {
+        ui.text_colored(ui.style_color(StyleColor::TextDisabled), label);
+    }
     let width = (ui.content_region_avail()[0] - 8.) * 0.5;
     for (i, text) in [left, right].iter().enumerate() {
         if i > 0 {
@@ -131,14 +135,18 @@ pub fn choice(ui: &Ui, label: &str, left: &str, right: &str, value: &mut bool) {
         let _color = ui.push_style_color(
             StyleColor::Button,
             if active {
-                [0.28, 0.35, 0.56, 1.]
+                ui.style_color(StyleColor::SliderGrab)
             } else {
-                [0.10, 0.12, 0.17, 1.]
+                ui.style_color(StyleColor::FrameBg)
             },
         );
         let _text = ui.push_style_color(
             StyleColor::Text,
-            if active { [0.95, 0.96, 1., 1.] } else { MUTED },
+            if active {
+                [1., 1., 1., 1.]
+            } else {
+                ui.style_color(StyleColor::Text)
+            },
         );
         if ui.button_with_size(text, [width, 34.]) {
             *value = i == 1;
@@ -172,41 +180,102 @@ pub fn theme(ctx: &mut hudhook::imgui::Context) {
             }),
         }]);
     }
+    apply_theme(ctx, false);
+}
+/// Update appearance without rebuilding the font atlas or touching game state.
+pub fn apply_theme(ctx: &mut hudhook::imgui::Context, dark: bool) {
     let style = ctx.style_mut();
-    style.window_rounding = 10.;
-    style.child_rounding = 8.;
-    style.frame_rounding = 5.;
-    style.grab_rounding = 5.;
+    if dark {
+        style.use_dark_colors();
+    } else {
+        style.use_light_colors();
+    }
+    style.window_rounding = 8.;
+    style.child_rounding = 0.;
+    style.frame_rounding = 4.;
+    style.grab_rounding = 8.;
     style.window_padding = [20., 18.];
-    style.frame_padding = [10., 7.];
-    style.item_spacing = [10., 9.];
-    style.scrollbar_size = 12.;
+    style.frame_padding = [10., 6.];
+    style.item_spacing = [10., 8.];
+    style.scrollbar_size = 9.;
     style.window_border_size = 1.;
-    style.colors[StyleColor::WindowBg as usize] = [0.045, 0.052, 0.073, 0.99];
-    style.colors[StyleColor::ChildBg as usize] = [0.055, 0.066, 0.09, 1.];
-    style.colors[StyleColor::Text as usize] = [0.91, 0.93, 0.97, 1.];
-    style.colors[StyleColor::TextDisabled as usize] = [0.52, 0.58, 0.68, 1.];
-    style.colors[StyleColor::Border as usize] = [0.18, 0.21, 0.27, 1.];
-    for key in [StyleColor::FrameBg, StyleColor::Button, StyleColor::Header] {
-        style.colors[key as usize] = [0.12, 0.15, 0.21, 1.];
+    style.child_border_size = 0.;
+    let bg = if dark {
+        [0.09, 0.105, 0.13, 0.99]
+    } else {
+        [0.965, 0.96, 0.945, 0.99]
+    };
+    let text = if dark {
+        [0.94, 0.95, 0.975, 1.]
+    } else {
+        [0.075, 0.09, 0.12, 1.]
+    };
+    let muted = if dark {
+        [0.65, 0.70, 0.77, 1.]
+    } else {
+        [0.36, 0.39, 0.44, 1.]
+    };
+    let border = if dark {
+        [0.22, 0.25, 0.30, 1.]
+    } else {
+        [0.80, 0.81, 0.82, 1.]
+    };
+    // White foreground on cobalt meets contrast in both modes.
+    let accent = if dark { [0.20, 0.40, 0.88, 1.] } else { ACCENT };
+    let frame = if dark {
+        [0.145, 0.165, 0.20, 1.]
+    } else {
+        [0.89, 0.90, 0.91, 1.]
+    };
+    let hover = if dark {
+        [0.19, 0.23, 0.30, 1.]
+    } else {
+        [0.85, 0.89, 0.95, 1.]
+    };
+    style.colors[StyleColor::WindowBg as usize] = bg;
+    style.colors[StyleColor::ChildBg as usize] = [0., 0., 0., 0.];
+    style.colors[StyleColor::PopupBg as usize] = [bg[0], bg[1], bg[2], 1.];
+    style.colors[StyleColor::Text as usize] = text;
+    style.colors[StyleColor::TextDisabled as usize] = muted;
+    style.colors[StyleColor::Border as usize] = border;
+    style.colors[StyleColor::Separator as usize] = border;
+    for key in [
+        StyleColor::FrameBg,
+        StyleColor::Button,
+        StyleColor::Header,
+        StyleColor::TitleBg,
+        StyleColor::TitleBgActive,
+        StyleColor::Tab,
+    ] {
+        style.colors[key as usize] = frame;
     }
     for key in [
         StyleColor::FrameBgHovered,
         StyleColor::ButtonHovered,
         StyleColor::HeaderHovered,
+        StyleColor::TabHovered,
     ] {
-        style.colors[key as usize] = [0.22, 0.27, 0.38, 1.];
+        style.colors[key as usize] = hover;
+    }
+    for key in [
+        StyleColor::FrameBgActive,
+        StyleColor::ButtonActive,
+        StyleColor::HeaderActive,
+        StyleColor::TabActive,
+    ] {
+        style.colors[key as usize] = hover;
     }
     for key in [
         StyleColor::CheckMark,
         StyleColor::SliderGrab,
         StyleColor::SliderGrabActive,
+        StyleColor::NavHighlight,
+        StyleColor::SeparatorActive,
+        StyleColor::SeparatorHovered,
     ] {
-        style.colors[key as usize] = [0.64, 0.70, 1., 1.];
+        style.colors[key as usize] = accent;
     }
-    style.colors[StyleColor::ButtonActive as usize] = [0.35, 0.42, 0.64, 1.];
-    style.colors[StyleColor::HeaderActive as usize] = [0.35, 0.42, 0.64, 1.];
-    style.colors[StyleColor::TitleBgActive as usize] = [0.09, 0.11, 0.16, 1.];
+    style.colors[StyleColor::TextSelectedBg as usize] = [accent[0], accent[1], accent[2], 0.3];
 }
 
 #[cfg(test)]
@@ -215,11 +284,13 @@ mod preview {
     #[test]
     #[ignore = "manual visual preview export"]
     fn export_ui_preview() {
-        use hudhook::imgui::{Condition, DrawCmd};
+        use hudhook::imgui::DrawCmd;
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../diagnostics");
         let mut ctx = hudhook::imgui::Context::create();
         ctx.set_ini_filename(None);
         theme(&mut ctx);
+        let dark = std::env::var("RACEDIRECTOR_PREVIEW_DARK").ok().as_deref() == Some("1");
+        apply_theme(&mut ctx, dark);
         let fonts = ctx.fonts();
         let atlas = fonts.build_rgba32_texture();
         let aw = atlas.width;
@@ -261,14 +332,7 @@ mod preview {
         // Warm-up frame lets ImGui establish window sizes before capturing geometry.
         for _ in 0..2 {
             let ui = ctx.frame();
-            crate::timing::draw(ui, &rows, &crate::timing::TowerSettings::default(), 3);
-            ui.window("RaceDirector Studio").position([520.,38.],Condition::Always).size([940.,810.],Condition::Always).build(||{
-                ui.text_colored(ACCENT,"RACE DIRECTOR  /  STUDIO");ui.same_line();ui.text_disabled("v0.1.14  /  60 FPS");
-                ui.text_colored([0.46,0.84,0.70,1.],"CONNECTED   /   Race camera & broadcast controls");ui.separator();
-                ui.child_window("nav").size([166.,-60.]).build(||{section(ui,"WORKSPACE");for (i,n) in ["Camera","Visuals","Saved shots","Performance","Timing tower","Help"].iter().enumerate(){ui.selectable_config(format!("{:02}   {}",i+1,n)).selected(i==1).size([0.,42.]).build();}section(ui,"SHORTCUTS");ui.text("Insert  Panel");ui.text("F8  Clean lock");ui.text("F10 Restore");});ui.same_line();
-                ui.child_window("content").size([0.,-60.]).build(||{heading(ui,"Visuals","Keep the shot clear. Each option works independently.");section(ui,"RACE HUD");toggle(ui,"Hide bottom HUD","Commentary, rank portrait, bottom controls and photo button.",&mut true);toggle(ui,"Hide skill popups + sidebar","Hide runner skill-name plates and the side notification feed.",&mut true);toggle(ui,"Hide runner arrows","Remove the markers above runners; keep minimap icons.",&mut false);section(ui,"CINEMATICS & EFFECTS");toggle(ui,"Skip skill cut-ins","Skip new unique animations. An animation already playing finishes normally.",&mut true);toggle(ui,"Hide speed lines","Remove radial speed blur and skill-line particles.",&mut false);});
-                ui.separator();ui.button_with_size("Save settings",[150.,36.]);ui.same_line();ui.button_with_size("Restore visuals  [F10]",[220.,36.]);
-            });
+            crate::overlay::draw_preview(ui, dark, &rows);
             let data = ctx.render();
             let mut lists = Vec::new();
             for list in data.draw_lists() {
