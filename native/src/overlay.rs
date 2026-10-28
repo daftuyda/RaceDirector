@@ -9,17 +9,18 @@ use hudhook::{
 };
 #[derive(Default)]
 struct ToggleKeys {
-    previous: [bool; 5],
+    previous: [bool; 6],
 }
 impl ToggleKeys {
-    fn sample(&mut self, down: [bool; 5], focused: bool) -> [bool; 5] {
+    fn sample(&mut self, down: [bool; 6], focused: bool) -> [bool; 6] {
         let pressed = std::array::from_fn(|i| focused && down[i] && !self.previous[i]);
         self.previous = down;
         pressed
     }
-    fn poll(&mut self, focused: bool) -> [bool; 5] {
+    fn poll(&mut self, focused: bool) -> [bool; 6] {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-        let down = [0x2D, 0x75, 0x76, 0x79, 0x77].map(|vk| unsafe { GetAsyncKeyState(vk) < 0 });
+        let down =
+            [0x2D, 0x75, 0x76, 0x79, 0x77, 0x78].map(|vk| unsafe { GetAsyncKeyState(vk) < 0 });
         self.sample(down, focused)
     }
 }
@@ -31,6 +32,8 @@ pub struct Panel {
     shot_name: String,
     message: String,
     page: usize,
+    tower_motion: crate::timing::TowerMotion,
+    timing_generation: u64,
 }
 impl Panel {
     pub fn new() -> Self {
@@ -43,6 +46,8 @@ impl Panel {
             shot_name: "New shot".into(),
             message: String::new(),
             page: 0,
+            tower_motion: crate::timing::TowerMotion::default(),
+            timing_generation: 0,
         }
     }
 }
@@ -95,7 +100,8 @@ impl ImguiRenderLoop for Panel {
     }
     fn render(&mut self, ui: &mut Ui) {
         let has_focus = focused();
-        let [menu_key, camera_key, ui_key, restore_key, capture_key] = self.keys.poll(has_focus);
+        let [menu_key, camera_key, ui_key, restore_key, capture_key, battle_key] =
+            self.keys.poll(has_focus);
         let Ok(mut s) = state().lock() else { return };
         if let Some(result) = self.autosave.tick(&s) {
             self.message = match result {
@@ -105,14 +111,7 @@ impl ImguiRenderLoop for Panel {
         }
         if !has_focus {
             s.capture = false;
-            if s.tower && s.race {
-                crate::timing::draw(
-                    ui,
-                    &s.timing_rows,
-                    &s.settings.tower,
-                    if s.camera { s.gate } else { -1 },
-                );
-            }
+            self.draw_coverage(ui, &s);
             return;
         }
         if capture_key {
@@ -136,21 +135,11 @@ impl ImguiRenderLoop for Panel {
             self.open = !self.open;
         }
         if restore_key {
-            s.capture = false;
-            s.camera = false;
-            s.hide_ui = false;
-            s.hide_bottom = false;
-            s.hide_skill_popups = false;
-            s.hide_markers = false;
-            s.skip_cutins = false;
-            s.hide_speed_lines = false;
-            s.hide_overhead = false;
-            s.hide_trees = false;
-            s.clean_effects = false;
-            s.graphics = false;
-            s.tower = false;
+            s.restore_visuals();
         }
-        if s.capture || (!ui.io().want_capture_keyboard && !ui.io().want_text_input) {
+        if !restore_key
+            && (s.capture || (!ui.io().want_capture_keyboard && !ui.io().want_text_input))
+        {
             if camera_key {
                 s.camera = !s.camera;
                 if !s.camera {
@@ -159,6 +148,16 @@ impl ImguiRenderLoop for Panel {
             }
             if ui_key {
                 s.hide_ui = !s.hide_ui;
+            }
+            if battle_key && s.race && s.camera && !s.freecam {
+                if s.settings.director.enabled {
+                    s.settings.director.enabled = false;
+                    s.settings.battle.enabled = false;
+                } else {
+                    s.settings.battle.enabled = !s.settings.battle.enabled;
+                }
+                s.coverage_gate = None;
+                s.battle_info = None;
             }
             if s.race && s.camera {
                 let dt = ui.io().delta_time.min(0.1);
@@ -239,14 +238,7 @@ impl ImguiRenderLoop for Panel {
             }
         }
         s.settings.sanitize();
-        if s.tower && s.race {
-            crate::timing::draw(
-                ui,
-                &s.timing_rows,
-                &s.settings.tower,
-                if s.camera { s.gate } else { -1 },
-            );
-        }
+        self.draw_coverage(ui, &s);
         if !self.open || s.capture {
             return;
         }
@@ -256,6 +248,71 @@ impl ImguiRenderLoop for Panel {
 }
 
 impl Panel {
+    fn draw_coverage(&mut self, ui: &Ui, s: &crate::state::State) {
+        if self.timing_generation != s.timing_generation || !s.race {
+            self.tower_motion.reset();
+            self.timing_generation = s.timing_generation;
+        }
+        if !s.race {
+            return;
+        }
+        let selected = (s.camera && !s.freecam).then_some(s.coverage_gate.unwrap_or(s.gate));
+        let battle = s.battle_info.as_ref().filter(|info| {
+            selected == Some(info.anchor)
+                && (s.settings.battle.enabled || s.settings.director.enabled)
+                && s.timing_rows.iter().any(|r| r.gate == info.partner)
+        });
+        if s.settings.broadcast.focus_markers {
+            if let Some(focus) = selected {
+                crate::markers::draw(
+                    ui,
+                    &s.focus_markers,
+                    &s.timing_rows,
+                    focus,
+                    battle.map(|b| b.partner),
+                );
+            }
+        }
+        if s.tower {
+            crate::timing::draw(
+                ui,
+                &s.timing_rows,
+                &s.settings.tower,
+                selected.unwrap_or(-1),
+                battle.map(|b| b.partner),
+                &mut self.tower_motion,
+            );
+        } else {
+            self.tower_motion.reset();
+        }
+        let mut broadcast = s.settings.broadcast.clone();
+        broadcast.race_distance_m = s.race_distance();
+        crate::broadcast::draw(
+            ui,
+            &s.timing_rows,
+            &s.settings.tower,
+            &broadcast,
+            if battle.is_some() && s.settings.broadcast.battle_card {
+                None
+            } else {
+                selected
+            },
+            &s.finished_gates,
+            s.tower,
+        );
+        if let Some(info) =
+            battle.filter(|_| !(s.settings.broadcast.results && !s.finished_gates.is_empty()))
+        {
+            crate::broadcast::draw_battle(
+                ui,
+                &s.timing_rows,
+                &s.settings.tower,
+                &s.settings.broadcast,
+                info,
+                s.tower,
+            );
+        }
+    }
     fn draw_settings(&mut self, ui: &Ui, s: &mut crate::state::State) {
         let display = ui.io().display_size;
         ui.window("RaceDirector Airframe")
@@ -275,8 +332,8 @@ impl Panel {
                 }
                 ui.text_disabled(format!("{}   /   {:.0} FPS   /   v{}", if s.race {"IN RACE"} else {"STANDBY"}, ui.io().framerate,env!("CARGO_PKG_VERSION")));
                 ui.separator();
-                let labels = ["Camera", "Visuals", "Shots", "Perf", "Tower", "Help"];
-                let columns = if ui.content_region_avail()[0] < 430. {3} else {6};
+                let labels = ["Camera", "Visuals", "Shots", "Perf", "Tower", "On air", "Help"];
+                let columns = if ui.content_region_avail()[0] < 500. {3} else {7};
                 let tab_width = (ui.content_region_avail()[0] - (columns - 1) as f32 * 6.) / columns as f32;
                 for (i, label) in labels.iter().enumerate() {
                     if i % columns != 0 {ui.same_line_with_spacing(0.,6.);}
@@ -308,9 +365,76 @@ impl Panel {
                                         }
                                     }
                                     if s.gates.is_empty(){ui.text_disabled("Enter a race to choose a runner.");}
+                                    option(ui, "Battle camera  [F9]", "Frame this runner and a nearby rival together.", &mut s.settings.battle.enabled);
+                                    if s.settings.battle.enabled {
+                                        let partner = s.settings.battle.partner_gate;
+                                        let partner_label = partner.map(|g| runner_label(s, g)).unwrap_or_else(|| "Auto / nearest rival".into());
+                                        if let Some(_combo) = ui.begin_combo("##battlepartner", &partner_label) {
+                                            if ui.selectable_config("Auto / nearest rival").selected(partner.is_none()).build() {s.settings.battle.partner_gate=None;}
+                                            for gate in s.gates.clone().into_iter().filter(|g| *g != s.gate) {
+                                                if ui.selectable_config(&runner_label(s, gate)).selected(partner==Some(gate)).build() {s.settings.battle.partner_gate=Some(gate);}
+                                            }
+                                        }
+                                        if let Some(info) = &s.battle_info {
+                                            ui.text_wrapped(format!("Following {} + {}", runner_label(s,info.anchor),runner_label(s,info.partner)));
+                                        } else { ui.text_wrapped("Waiting for an eligible rival and camera aspect. Normal follow continues until a pair is available."); }
+                                        if ui.collapsing_header("Battle selection",hudhook::imgui::TreeNodeFlags::empty()) {
+                                            inspector_slider(ui,"Minimum hold (s)",1.,15.,&mut s.settings.battle.hold_seconds);
+                                            inspector_slider(ui,"Maximum gap (m)",5.,100.,&mut s.settings.battle.max_gap);
+                                            ui.text_wrapped("Auto considers the runners immediately ahead and behind. The pair stays together through an overtake. Manual partners are saved by gate; review for each race.");
+                                        }
+                                    }
                                 } else {
                                     ui.text_wrapped("WASD + Q/E to fly. Shift boosts; Ctrl slows. Right-drag looks around; F8 locks mouse-look.");
                                 }
+                            }
+                            ui.spacing();
+                            if ui.collapsing_header("Automatic director",hudhook::imgui::TreeNodeFlags::DEFAULT_OPEN) {
+                                let was=s.settings.director.enabled;
+                                option(ui,"Automatic directing","Enable Follow camera, tour the runners and cover the finish.",&mut s.settings.director.enabled);
+                                if s.settings.director.enabled && !was { s.start_director(); }
+                                ui.text_wrapped(&s.director_status);
+                                ui.text_wrapped(s.distance_status());
+                                if s.settings.director.enabled && (!s.camera || s.freecam) && ui.button("Resume automatic Follow") { s.start_director(); }
+                                ui.text("Race length override (0 = Auto)");
+                                ui.input_float("##directorracelength",&mut s.settings.broadcast.race_distance_m).step(100.).build();
+                                if s.settings.broadcast.race_distance_m > 0. && ui.button("Use game race length") { s.settings.broadcast.race_distance_m=0.; }
+                                option(ui,"Include battles","Frame a nearby rival during the tour and regular Follow.",&mut s.settings.director.battles);
+                                if ui.collapsing_header("Continuous movement",hudhook::imgui::TreeNodeFlags::DEFAULT_OPEN) {
+                                    option(ui,"Gentle camera movement","Slow orbit, dolly and zoom from the moment directing starts, including while paused.",&mut s.settings.director.ambient_motion);
+                                    inspector_slider(ui,"Movement amount",0.,1.5,&mut s.settings.director.motion_amount);
+                                    inspector_slider(ui,"Movement cycle (s)",12.,60.,&mut s.settings.director.motion_period);
+                                    ui.text_wrapped("Movement continues between target changes. Freecam and manual Follow are unaffected. A fixed finish shot keeps its position.");
+                                }
+                                if ui.collapsing_header("Runner tour",hudhook::imgui::TreeNodeFlags::empty()) {
+                                    option(ui,"Mid-race runner tour","Visit each runner once, then return to your selected runner.",&mut s.settings.director.tour_enabled);
+                                    inspector_slider(ui,"Tour start (race fraction)",0.05,0.75,&mut s.settings.director.start_fraction);
+                                    inspector_slider(ui,"Seconds per runner",5.,15.,&mut s.settings.director.dwell);
+                                    if ui.button("Start / restart runner tour now") { s.start_director(); s.settings.director.tour_enabled=true; s.restart_tour=true; }
+                                    ui.text_wrapped("The tour starts at your selected runner and visits nearby runners without flipping camera sides. Holds use viewing time, including during fast-forward; pausing stops runner changes. Finish coverage takes priority.");
+                                }
+                                if ui.collapsing_header("Finish coverage",hudhook::imgui::TreeNodeFlags::empty()) {
+                                    option(ui,"Automatic finish coverage","Follow the lead contest near the finish. Requires director or Battle camera.",&mut s.settings.battle.finish_coverage);
+                                    inspector_slider(ui,"Switch with metres remaining",50.,1000.,&mut s.settings.battle.finish_distance);
+                                    option(ui,"Front-quarter finish view","Use a moving front angle before the stationary shot.",&mut s.settings.battle.finish_front_view);
+                                    option(ui,"Fixed finish camera","Pan and zoom from a stationary position near the line.",&mut s.settings.director.static_finish);
+                                    option(ui,"Estimate finish position automatically","In the last 120 m, use the leaders' direction and course scale to place the camera. An armed saved position takes priority.",&mut s.settings.director.auto_finish);
+                                    ui.text("Finish camera side");
+                                    crate::design::choice(ui,"##finishside","Left of travel","Right of travel",&mut s.settings.director.finish_right_side);
+                                    ui.text_wrapped("Left is the opposite side from v0.1.22. This changes the moving finish angle and estimated fixed position. An armed saved position stays where you placed it.");
+                                    ui.text_wrapped("Automatic placement estimates a straight finish from current race geometry. Use a saved spot for precise placement. No final-corner detector is used.");
+                                    if s.camera && s.race && s.freecam {
+                                        if ui.button("Save current Freecam as finish camera") { s.save_finish_camera=true; }
+                                    } else { ui.text_wrapped("For a precise spot, position Freecam beside and beyond the finish line, save it here, then return to Follow."); }
+                                    if s.settings.director.finish_camera.is_some() {
+                                        if s.race && s.camera && ui.button("Arm saved finish camera for this race") { s.finish_camera_armed=true; }
+                                        if ui.button("Clear saved finish camera") { s.settings.director.finish_camera=None; s.finish_camera_armed=false; }
+                                        ui.text_disabled(if s.finish_camera_armed {"Saved position armed"} else {"Saved position unarmed / verify course"});
+                                    }
+                                    if s.race_distance()<=s.settings.battle.finish_distance { ui.text_wrapped("Finish coverage needs a race length longer than the threshold. Enter an override if Auto is unavailable."); }
+                                    ui.text_wrapped("Saved positions must be armed for each new race. Without an available fixed position, moving lead-battle coverage continues.");
+                                }
+                                ui.text_wrapped("F9 stops automatic directing. F10 restores the game camera.");
                             }
                             ui.spacing();
                             if ui.collapsing_header("Framing", hudhook::imgui::TreeNodeFlags::DEFAULT_OPEN) {
@@ -442,16 +566,18 @@ impl Panel {
                             ui.separator();
                             crate::design::section(ui, "TRAINERS");
                             option(ui, "Show trainer names", "An optional second line beneath each runner.", &mut s.settings.tower.show_trainers);
-                            ui.text_wrapped("Add trainer names by gate below. These labels are saved by gate, so review them when changing races. Automatic trainer lookup is not available yet.");
-                            if ui.button("Clear trainer names") { s.settings.tower.trainer_names.clear(); }
+                            option(ui,"Automatic trainer names","Use names supplied by the game for this race.",&mut s.settings.tower.auto_trainers);
+                            ui.text_wrapped("Nonblank manual names override automatic names. Clear an override to use the game name. Manual labels persist by gate; review them each race. Some race modes may not supply names.");
+                            if ui.button("Clear manual overrides") { s.settings.tower.trainer_names.clear(); }
                             ui.child_window("trainer_names").size([0.,190.]).build(|| {
                                 let gates = if s.gates.is_empty() {(1..=18).collect::<Vec<i32>>()}else{s.gates.clone()};
                                 for gate in gates {
                                     let _id = ui.push_id(format!("trainer_{gate}"));
                                     let label = s.timing_rows.iter().find(|r|r.gate==gate).map(|r|format!("Gate {gate:02}  {}",r.name)).unwrap_or_else(||format!("Gate {gate:02}"));
                                     ui.text(&label);
+                                    if let Some(name) = s.timing_rows.iter().find(|r|r.gate==gate).and_then(|r|r.trainer_name.as_deref()) {ui.text_disabled(format!("Game: {name}"));}
                                     let mut value = s.settings.tower.trainer_names.get(&gate).cloned().unwrap_or_default();
-                                    if ui.input_text("##trainer", &mut value).hint("Trainer name (optional)").build() {
+                                    if ui.input_text("##trainer", &mut value).hint("Manual override (optional)").build() {
                                         s.settings.tower.trainer_names.insert(gate,value);
                                     }
                                 }
@@ -465,6 +591,8 @@ impl Panel {
                             ui.text_wrapped("Seconds estimate = track-distance gap / trailing runner speed. This is not a measured crossing-time interval. Missing values show --.");
                             ui.separator();
                             crate::design::section(ui, "APPEARANCE");
+                            option(ui, "Animate position changes", "Rows glide into their new positions.", &mut s.settings.tower.animated_rows);
+                            option(ui, "Show places gained / lost", "Brief indicators after a confirmed order change.", &mut s.settings.tower.position_changes);
                             crate::design::choice(ui, "Screen side", "Left", "Right", &mut s.settings.tower.right);
                             ui.text("Size"); ui.slider("##towerscale",0.6,1.5,&mut s.settings.tower.scale);
                             ui.text("Background opacity"); ui.slider("##toweralpha",0.2,1.,&mut s.settings.tower.opacity);
@@ -472,9 +600,49 @@ impl Panel {
                             ui.text_wrapped("Automatically shrinks to fit all runners on screen. The followed runner is highlighted. Layout and visibility are saved automatically.");
                             ui.separator();ui.text_wrapped(&s.timing_status);
                         }
+                        5 => {
+                            heading(ui,"Broadcast graphics","Race context and runner cards, visible during clean capture.");
+                            if ui.button("Show coverage graphics") {
+                                s.tower=true;
+                                s.settings.broadcast.spotlight=true;
+                                s.settings.broadcast.focus_markers=true;
+                                s.settings.broadcast.battle_card=true;
+                                s.settings.broadcast.progress=true;
+                                s.settings.broadcast.results=true;
+                            }
+                            if ui.button("Hide coverage graphics") {
+                                s.tower=false;
+                                s.settings.broadcast.spotlight=false;
+                                s.settings.broadcast.focus_markers=false;
+                                s.settings.broadcast.battle_card=false;
+                                s.settings.broadcast.progress=false;
+                                s.settings.broadcast.results=false;
+                            }
+                            option(ui,"Runner focus markers","Labels above the focused runner and battle rival. Visible in clean capture; hidden in Freecam.",&mut s.settings.broadcast.focus_markers);
+                            if s.settings.broadcast.focus_markers { inspector_slider(ui,"Marker height above ground",1.4,3.5,&mut s.settings.broadcast.marker_height); }
+                            option(ui,"Runner spotlight","Name, trainer, position and speed for the followed runner.",&mut s.settings.broadcast.spotlight);
+                            option(ui,"Battle card","Both contenders, distance gap and relative closing speed.",&mut s.settings.broadcast.battle_card);
+                            option(ui,"Race progress","Distance remaining from game metadata or your manual override.",&mut s.settings.broadcast.progress);
+                            option(ui,"Finish and results","Winner and finish order appear only as runners finish.",&mut s.settings.broadcast.results);
+                            ui.text_wrapped("Cards sit opposite the tower. Freecam has no followed-runner card. F10 hides all coverage graphics.");
+                            ui.separator();
+                            crate::design::section(ui,"EVENT DETAILS");
+                            ui.text("Event / round");
+                            ui.input_text("##eventname",&mut s.settings.broadcast.event_name).hint("Optional event title").build();
+                            ui.text("Course");
+                            ui.input_text("##coursename",&mut s.settings.broadcast.course_name).hint("Optional course name").build();
+                            ui.text("Race length override (0 = Auto)");
+                            ui.input_float("##racedistance",&mut s.settings.broadcast.race_distance_m).step(100.).build();
+                            ui.text_wrapped("Event labels and length overrides are saved. Leave length at 0 to use game metadata when available; otherwise covered metres are shown. Review overrides for each race. Trainer labels come from Tower > Trainers.");
+                            ui.separator();
+                            crate::design::section(ui,"APPEARANCE");
+                            inspector_slider(ui,"Graphics size",0.6,1.5,&mut s.settings.broadcast.scale);
+                            inspector_slider(ui,"Background opacity",0.2,1.,&mut s.settings.broadcast.opacity);
+                            ui.text_wrapped(&s.timing_status);
+                        }
                         _ => {
                             heading(ui, "Help & status", "Controls stay available with the panel closed.");
-                            for line in ["F8 / Clean capture lock (F8 or Escape releases)", "WASD + Q/E / Freecam flight", "Shift / Freecam boost; Ctrl / slow", "Right-drag  /  Orbit and pitch", "Mouse wheel  /  Zoom", "Arrow keys  /  Orbit and pitch", "Page Up / Down  /  Height", "[ and ]  /  Previous or next runner", "Shift  /  Fine keyboard movement", "F10  /  Restore camera and all visual hiding"] { ui.text(line); }
+                            for line in ["F8 / Clean capture lock (F8 or Escape releases)", "F9 / Stop director or toggle battle camera", "WASD + Q/E / Freecam flight", "Shift / Freecam boost; Ctrl / slow", "Right-drag  /  Orbit and pitch", "Mouse wheel  /  Zoom", "Arrow keys  /  Orbit and pitch", "Page Up / Down  /  Height", "[ and ]  /  Previous or next runner", "Shift  /  Fine keyboard movement", "F10  /  Restore camera and all visual hiding"] { ui.text(line); }
                             if ui.button("Save settings now") {self.message = match save(&s.snapshot()) {Ok(()) => "Settings saved".into(),Err(e) => format!("Save failed: {e}")};}
                             ui.separator(); ui.text_wrapped(&s.status);
                             ui.text_wrapped(&s.visual_status); ui.text_wrapped(&s.fps_status);
@@ -490,7 +658,7 @@ impl Panel {
                 }
                 ui.same_line();
                 if ui.button_with_size("Restore  [F10]", [footer_width,34.]) {
-                    s.capture = false; s.camera = false; s.hide_ui = false; s.hide_bottom = false; s.hide_skill_popups = false; s.hide_markers = false; s.skip_cutins = false; s.hide_speed_lines = false; s.hide_overhead = false; s.hide_trees = false; s.clean_effects = false; s.graphics = false; s.tower = false;
+                    s.restore_visuals();
                 }
                 ui.text_wrapped(&self.message);
             });
@@ -504,26 +672,26 @@ mod input_tests {
     fn held_toggle_fires_once() {
         let mut k = ToggleKeys::default();
         assert_eq!(
-            k.sample([true, false, false, false, false], true),
-            [true, false, false, false, false]
+            k.sample([true, false, false, false, false, false], true),
+            [true, false, false, false, false, false]
         );
         assert_eq!(
-            k.sample([true, false, false, false, false], true),
-            [false; 5]
+            k.sample([true, false, false, false, false, false], true),
+            [false; 6]
         );
-        k.sample([false; 5], true);
-        assert!(k.sample([true, false, false, false, false], true)[0]);
+        k.sample([false; 6], true);
+        assert!(k.sample([true, false, false, false, false, false], true)[0]);
     }
     #[test]
     fn unfocused_press_is_not_replayed() {
         let mut k = ToggleKeys::default();
         assert_eq!(
-            k.sample([false, true, false, false, false], false),
-            [false; 5]
+            k.sample([false, true, false, false, false, false], false),
+            [false; 6]
         );
         assert_eq!(
-            k.sample([false, true, false, false, false], true),
-            [false; 5]
+            k.sample([false, true, false, false, false, false], true),
+            [false; 6]
         );
     }
 }
@@ -608,7 +776,7 @@ pub(crate) fn draw_preview(ui: &Ui, dark: bool, rows: &[crate::timing::Runner]) 
     s.gate = 3;
     s.gates = rows.iter().map(|r| r.gate).collect();
     s.timing_rows = rows.to_vec();
-    crate::timing::draw(ui, rows, &s.settings.tower, s.gate);
+    s.tower = true;
     let mut panel = Panel {
         keys: ToggleKeys::default(),
         autosave: crate::state::AutoSave::new(),
@@ -617,6 +785,69 @@ pub(crate) fn draw_preview(ui: &Ui, dark: bool, rows: &[crate::timing::Runner]) 
         shot_name: String::new(),
         message: "Settings saved automatically".into(),
         page: 0,
+        tower_motion: crate::timing::TowerMotion::default(),
+        timing_generation: 0,
     };
-    panel.draw_settings(ui, &mut s);
+    let scene = std::env::var("RACEDIRECTOR_PREVIEW_SCENE").unwrap_or_default();
+    if !scene.is_empty() {
+        s.settings.broadcast.spotlight = true;
+        s.settings.broadcast.progress = true;
+        s.settings.broadcast.event_name = "Championship / Final".into();
+        s.settings.broadcast.course_name = "Tokyo / Turf".into();
+        s.settings.broadcast.race_distance_m = 2000.;
+        if scene == "battle" {
+            s.settings.battle.enabled = true;
+            s.focus_markers = vec![
+                crate::markers::Marker {
+                    gate: 3,
+                    point: [0.40, 0.45],
+                },
+                crate::markers::Marker {
+                    gate: 2,
+                    point: [0.49, 0.46],
+                },
+            ];
+            s.settings.broadcast.battle_card = true;
+            s.battle_info = Some(crate::battle::BattleInfo {
+                anchor: 3,
+                partner: 2,
+                position: Some(2),
+                gap_m: Some(1.7),
+                closing_mps: Some(0.4),
+            });
+        }
+        if scene == "results" {
+            s.settings.broadcast.results = true;
+            s.finished_gates = rows.iter().map(|r| r.gate).collect();
+        }
+    }
+    panel.draw_coverage(ui, &s);
+    if scene.is_empty() || scene == "settings" || scene == "director" {
+        if scene == "settings" {
+            panel.page = 5;
+        }
+        if scene == "director" {
+            s.settings.director.enabled = true;
+            s.settings.battle.finish_coverage = true;
+            s.settings.director.finish_camera = Some(crate::director::FixedCamera {
+                eye: crate::model::Vec3 {
+                    x: 120.,
+                    y: 4.,
+                    z: 60.,
+                },
+                fov: 30.,
+            });
+            s.finish_camera_armed = true;
+            s.director_status = "Ready / tour starts at 25%".into();
+        }
+        panel.draw_settings(ui, &mut s);
+    }
+}
+
+fn runner_label(s: &crate::state::State, gate: i32) -> String {
+    s.timing_rows
+        .iter()
+        .find(|r| r.gate == gate)
+        .map(|r| format!("Gate {gate:02}  {}", r.name))
+        .unwrap_or_else(|| format!("Gate {gate:02}"))
 }

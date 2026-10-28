@@ -6,7 +6,7 @@ Windows x64 and Steam Global Umamusume. Close the game before installing, updati
 
 ## Install
 
-1. Download **RaceDirector-v0.1.18-windows-x64.zip** from Releases and extract it to a separate folder. GitHub's source-code ZIP does not contain the built plugin.
+1. Download **RaceDirector-v0.1.23-windows-x64.zip** from Releases and extract it to a separate folder. GitHub's source-code ZIP does not contain the built plugin.
 2. In Steam, choose the game's **Manage > Browse local files**. Use the folder containing **UmamusumePrettyDerby.exe**.
 3. Open PowerShell in the extracted release folder and run, replacing the path:
 
@@ -70,9 +70,39 @@ To uninstall, close the game and remove only the three RaceDirector-installed fi
 - **Settings not saved:** check Help/status for an auto-save error and try Save settings. Older versions did not save toggle states, so set them once after updating.
 - **Bad camera/rendering:** use F10 and disable overlapping mod camera controls. Re-enable features individually.
 - **Low FPS:** reduce supersampling/MSAA and disable overhead views.
+- **Battle camera stays in normal follow:** enable Camera and Follow mode, select an eligible rival, and check the maximum gap. Finished runners are not paired. Camera aspect and race telemetry must be available.
+- **No spotlight:** enable Runner spotlight under On air and follow a runner with the camera enabled. Freecam has no followed-runner card.
+- **Wrong distance remaining:** review the length override under On air > Event details; use 0 for game-supplied length when available. The director panel reports the value and source.
+- **No winner card yet:** results are shown only after the game confirms runners have finished. Enable Finish and results under On air.
 
 Report the plugin/game versions, other mods, reproduction steps and relevant log lines. Remove personal information from logs before sharing.
 
 ## Airframe (v0.1.18)
 
 Use the Light / Dark buttons at the top of the panel. Both theme and feature choices save automatically. Help contains Save settings now. Tower > Trainers provides optional manual names by gate; clear or review names when switching races. No automatic trainer lookup is claimed.
+
+## Broadcast coverage (v0.1.19)
+
+After updating, open **On air** and choose **Show coverage graphics**, or enable individual graphics. For battle framing, enable the camera with **F6**, choose **Follow**, select a runner, then press **F9** or use Battle camera under Camera > Mode. Auto selects a nearby rival; the partner menu can pin a specific gate.
+
+**Tower > Appearance** controls row animation and position-change indicators. **On air > Event details** holds event/course names and the optional race-length override. Review these and trainer names for each new race. F8 keeps enabled graphics visible during clean capture; F10 disables them and remembers that choice.
+
+See [Broadcast guide](BROADCAST.md) for a complete setup walkthrough and data limitations.
+
+## Automatic trainers (v0.1.20)
+
+Enable Show trainer names and Automatic trainer names under Tower > Trainers. Clear any old manual overrides to use game names. Missing game names remain blank; race-mode availability needs live verification. Lookup is optional and does not prevent the plugin loading if the getter is unavailable.
+
+
+## Automatic directing and runner labels (v0.1.23)
+
+Enable **Camera > Automatic director > Automatic directing**. This enables Follow camera, finish coverage and (by default) automatic battle pairing. Leave **Race length override** at **0** for Auto; the panel shows the detected value or explains what is missing. The tour still runs at 200 m if length is unavailable, while finish coverage requires a known length. Use **Runner tour > Start / restart runner tour now** to check a tour without waiting for its configured start.
+
+Under **Finish coverage**, automatic placement uses actual travel direction to estimate a fixed spot in the last 120 m. An armed saved Freecam position takes priority. These features require the updated DLL and a game restart; replacing files does not update a loaded plugin.
+
+**On air > Runner focus markers** toggles the custom labels above the selected runner and battle rival. This works independently of the native arrow-hiding setting, and remains visible during clean capture. F10 turns it off with the other graphics. Phase changes are recorded in `%LOCALAPPDATA%\RaceDirector\startup.log` with the applied camera coordinates.
+
+
+**Continuous movement > Gentle camera movement** now starts immediately and continues between runner changes, including while paused. Disable it for a still paused shot. Tour holds are at least 5 viewing seconds (new default 6), even in fast-forward, and automatic target transitions last at least 1.8 seconds.
+
+**Finish camera side > Left of travel** is the new default, moving the estimated finish view to the opposite side from v0.1.22. Right of travel restores the prior side; armed saved positions retain their chosen location. Focus labels sit closer to the runners, with a saved **Marker height above ground** adjustment under On air.

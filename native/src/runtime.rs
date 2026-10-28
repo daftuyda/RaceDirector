@@ -31,12 +31,19 @@ struct Horse {
 struct Live {
     pose: Pose,
     target_tween: crate::camera_motion::TargetTween,
+    battle: crate::battle::BattleTracker,
+    battle_generation: u64,
+    director: crate::director::Controller,
+    director_log: String,
+    fixed: crate::director::FixedTracker,
+    auto_finish: crate::director::AutoFinish,
     ground: GroundCache,
     free_pose: Option<FreePose>,
     last: Instant,
     race_seen: Option<Instant>,
     timing_last: Option<Instant>,
     timing_bindings: Option<(usize, TimingApi)>,
+    course_bindings: Option<(usize, CourseApi)>,
     manager: Option<u32>,
     restore: Vec<(u32, f32)>,
     world_restore: Vec<(u32, bool)>,
@@ -50,12 +57,19 @@ fn live() -> &'static Mutex<Live> {
         Mutex::new(Live {
             pose: Pose::default(),
             target_tween: crate::camera_motion::TargetTween::default(),
+            battle: crate::battle::BattleTracker::default(),
+            battle_generation: 0,
+            director: crate::director::Controller::default(),
+            director_log: String::new(),
+            fixed: crate::director::FixedTracker::default(),
+            auto_finish: crate::director::AutoFinish::default(),
             ground: GroundCache::default(),
             free_pose: None,
             last: Instant::now(),
             race_seen: None,
             timing_last: None,
             timing_bindings: None,
+            course_bindings: None,
             manager: None,
             restore: vec![],
             world_restore: vec![],
@@ -70,6 +84,7 @@ struct Api {
     rot: usize,
     horse_class: usize,
     horse_data: usize,
+    trainer_name: usize,
     gate: usize,
     find: usize,
     manager_type: usize,
@@ -81,6 +96,7 @@ struct Api {
     renderer_type: usize,
     color_get: usize,
     alpha_set: usize,
+    aspect_get: usize,
     fov_get: usize,
     fov_set: usize,
     near_get: usize,
@@ -217,6 +233,16 @@ unsafe fn horses(l: &mut Live) -> Vec<Horse> {
     let a = API.get().unwrap();
     let mut mgr = l.manager.map(|h| target(h)).unwrap_or(std::ptr::null_mut());
     if !valid(mgr) {
+        // A new manager can appear without an intervening empty race frame.
+        // Invalidate before the telemetry throttle to avoid cross-race overlays.
+        l.timing_last = None;
+        l.timing_bindings = None;
+        l.course_bindings = None;
+        l.battle.reset();
+        l.target_tween.reset();
+        if let Ok(mut s) = state().lock() {
+            s.clear_telemetry();
+        }
         if let Some(h) = l.manager.take() {
             release(h);
         }
@@ -274,12 +300,21 @@ unsafe extern "C" fn on_late(this: Obj, mi: Obj) {
     let hs = horses(&mut l);
     let cam = get(a.current_camera, this);
     let racing = !hs.is_empty() && valid(cam);
-    let (enabled, gate, pose, response) = {
+    let (enabled, pose, response) = {
         let Ok(mut s) = state().lock() else { return };
         s.race = racing;
         if !racing || !s.camera {
+            s.battle_info = None;
+            s.coverage_gate = None;
+            s.focus_markers.clear();
             s.free_pose = None;
             s.capture = false;
+            s.director_status = if !racing {
+                "Waiting for a race"
+            } else {
+                "Camera off / enable Camera control [F6]"
+            }
+            .into();
         }
         s.gates = hs.iter().map(|h| h.gate).collect();
         s.gates.sort();
@@ -289,11 +324,15 @@ unsafe extern "C" fn on_late(this: Obj, mi: Obj) {
                 s.gate = *g;
             }
         }
-        (s.camera, s.gate, s.settings.pose, s.settings.response)
+        (s.camera, s.settings.pose, s.settings.response)
     };
     update_timing(&mut l, racing);
     if !racing {
+        l.director.reset();
+        l.fixed.reset();
+        l.auto_finish.reset();
         l.race_seen = None;
+        l.battle.reset();
         l.target_tween.reset();
         clear_ground(&mut l.ground);
         l.free_pose = None;
@@ -303,21 +342,64 @@ unsafe extern "C" fn on_late(this: Obj, mi: Obj) {
     let dt = now.duration_since(l.last).as_secs_f32();
     l.last = now;
     if !enabled {
+        l.director.reset();
+        l.fixed.reset();
+        l.auto_finish.reset();
+        l.battle.reset();
         l.pose = pose;
         l.target_tween.reset();
         l.free_pose = None;
         return;
     }
+    let coverage = {
+        let Ok(mut s) = state().lock() else { return };
+        if s.timing_generation != l.battle_generation {
+            l.director.reset();
+            l.fixed.reset();
+            l.auto_finish.reset();
+            l.battle.reset();
+            l.target_tween.reset();
+            l.battle_generation = s.timing_generation;
+        }
+        l.director
+            .update(&mut s, &hs.iter().map(|h| h.gate).collect::<Vec<_>>(), dt)
+    };
+    let crate::director::Coverage {
+        gate,
+        pose,
+        finish: finish_selection,
+        touring: tour_active,
+        pairing,
+        transition,
+    } = coverage;
     let Some(h) = hs.iter().find(|h| h.gate == gate) else {
         return;
     };
+    if let Ok(s) = state().lock() {
+        if let Some(leader) = s.timing_rows.iter().find(|r| r.rank == Some(1)) {
+            if let (Some(progress), Some(horse)) =
+                (leader.distance, hs.iter().find(|h| h.gate == leader.gate))
+            {
+                l.auto_finish.observe(leader.gate, progress, horse.pos);
+            }
+        }
+    }
     update_ground(&mut l);
-    l.pose.approach(pose, dt, response);
+    let aspect = scalar::<f32>(a.aspect_get, cam).filter(|v| v.is_finite() && *v > 0.1 && *v < 10.);
     let pack = pack_center(hs.iter().map(|h| h.pos)).unwrap();
-    let (mut eye, mut q, fov, aim, clearance) = {
+    let mut battle_points = None;
+    let (mut eye, mut q, mut fov, mut aim, clearance) = {
         let Ok(mut s) = state().lock() else { return };
         let clearance = s.settings.ground_clearance;
+        if s.timing_generation != l.battle_generation {
+            l.battle.reset();
+            l.target_tween.reset();
+            l.battle_generation = s.timing_generation;
+        }
         if s.freecam {
+            s.battle_info = None;
+            l.battle.reset();
+            l.pose.approach(pose, dt, response);
             l.target_tween.reset();
             if s.free_pose.is_none() {
                 l.free_pose = None;
@@ -340,35 +422,180 @@ unsafe extern "C" fn on_late(this: Obj, mi: Obj) {
         } else {
             s.free_pose = None;
             l.free_pose = None;
-            let (anchor, heading) = l.target_tween.follow(
-                gate,
-                h.pos,
-                h.heading,
-                pack,
-                dt,
-                s.settings.target_transition,
-            );
-            let (eye, q) = orbit(l.pose, anchor, heading);
+            // Keep both runners in one view. The gate-pair key gives the existing
+            // target tween a distinct identity when battle mode enters or changes pair.
+            let info = if let Some(selection) = finish_selection {
+                l.battle.reset();
+                selection.info(&s.timing_rows).filter(|_| aspect.is_some())
+            } else if aspect.is_some() && pairing.enabled {
+                let contenders = s
+                    .timing_rows
+                    .iter()
+                    .filter(|r| !s.finished_gates.contains(&r.gate))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                l.battle.update(&contenders, gate, &pairing, dt.min(0.1))
+            } else {
+                l.battle.reset();
+                None
+            };
+            if s.settings.director.enabled && finish_selection.is_none() {
+                if let Some(info) = info {
+                    let segment = if tour_active {
+                        "Runner tour + battle"
+                    } else {
+                        "Battle"
+                    };
+                    s.director_status =
+                        format!("{segment} / gates {} + {}", info.anchor, info.partner);
+                }
+            }
+            let pair = info.and_then(|info| {
+                hs.iter()
+                    .find(|p| p.gate == info.partner)
+                    .map(|p| (info, *p))
+            });
+            let (wanted, target, target_key, target_heading) = if let Some((info, other)) = pair {
+                battle_points = Some((h.pos, other.pos));
+                let heading = crate::director::pair_heading(h.heading, other.heading);
+                let (wanted, target) =
+                    crate::battle::frame(pose, h.pos, other.pos, heading, aspect.unwrap());
+                let key = finish_selection
+                    .map_or(crate::director::pair_key(gate, info.partner), |x| x.key());
+                s.battle_info = Some(info);
+                (wanted, target, key, heading)
+            } else {
+                s.battle_info = None;
+                (
+                    pose,
+                    h.pos,
+                    finish_selection.map_or(gate, |x| x.key()),
+                    h.heading,
+                )
+            };
+            let response = if s.settings.director.enabled {
+                response.min(1.5)
+            } else {
+                response
+            };
+            l.pose.approach(wanted, dt, response);
+            let (anchor, heading) =
+                l.target_tween
+                    .follow(target_key, target, target_heading, pack, dt, transition);
+            // Once a shot has arrived, protect pair framing. During automatic
+            // travel, retain the smooth rig instead of abruptly pulling back.
+            let displayed = if s.settings.director.enabled && !l.target_tween.settled() {
+                // Let the shot travel to its new subject before enforcing pair
+                // framing. Immediate fitting at the old anchor caused zoom jumps.
+                l.pose
+            } else if let Some((_, other)) = pair {
+                crate::battle::fit_at(l.pose, h.pos, other.pos, anchor, heading, aspect.unwrap())
+            } else {
+                l.pose
+            };
+            let (eye, q) = orbit(displayed, anchor, heading);
             (
                 eye,
                 q,
-                l.pose.fov,
+                displayed.fov,
                 Some(Vec3 {
                     x: anchor.x,
-                    y: anchor.y + l.pose.height,
+                    y: anchor.y + displayed.height,
                     z: anchor.z,
                 }),
                 clearance,
             )
         }
     };
+    {
+        let Ok(mut s) = state().lock() else { return };
+        let saved = s
+            .settings
+            .director
+            .finish_camera
+            .filter(|_| s.finish_camera_armed);
+        let fixed = if finish_selection.is_some() && s.settings.director.static_finish {
+            if let Some(camera) = saved {
+                Some(camera)
+            } else if s.settings.director.enabled && s.settings.director.auto_finish {
+                let remaining = s
+                    .timing_rows
+                    .iter()
+                    .find(|r| r.gate == gate)
+                    .and_then(|r| r.distance)
+                    .map(|d| s.race_distance() - d);
+                remaining.and_then(|remaining| {
+                    l.auto_finish.place(
+                        h.pos,
+                        remaining,
+                        s.course_world_scale,
+                        s.settings.director.finish_right_side,
+                    )
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if finish_selection.is_none() {
+            l.auto_finish.clear_camera();
+        }
+        if let (Some(camera), Some(target)) = (fixed, aim) {
+            let (position, tracking) = l.fixed.view(eye, camera, target, dt, transition);
+            eye = position;
+            q = crate::camera_motion::look_at(eye, tracking);
+            aim = Some(tracking);
+            let (first, second) = battle_points.unwrap_or((h.pos, h.pos));
+            fov = l.fixed.lens(
+                eye,
+                tracking,
+                first,
+                second,
+                camera.fov,
+                aspect.unwrap_or(16. / 9.),
+                dt,
+            );
+            s.director_status = if saved.is_some() {
+                "Finish / saved fixed camera"
+            } else {
+                "Finish / estimated fixed camera"
+            }
+            .into();
+        } else {
+            l.fixed.reset();
+            if finish_selection.is_some() && s.settings.director.static_finish {
+                let reason = if s.settings.director.enabled && s.settings.director.auto_finish {
+                    " / fixed shot waits for last 120 m and movement samples"
+                } else {
+                    " / no saved position armed"
+                };
+                s.director_status.push_str(reason);
+            }
+        }
+    }
     let floor = ground_at(&l.ground.surface, eye, &hs);
     if crate::camera_motion::clamp_height(&mut eye, floor, clearance) {
         if let Some(aim) = aim {
             q = crate::camera_motion::look_at(eye, aim);
+            if let Some((first, second)) = battle_points {
+                // Raising the eye changes projection; refit the lens at the
+                // final ground-safe position, not the old below-ground orbit.
+                fov = crate::battle::grounded_fov(eye, aim, first, second, fov, aspect.unwrap());
+            }
         }
         if let Some(displayed) = &mut l.free_pose {
             displayed.offset.y = eye.y - pack.y;
+        }
+    }
+    if let Ok(mut s) = state().lock() {
+        if s.save_finish_camera {
+            if s.freecam {
+                s.settings.director.finish_camera = Some(crate::director::FixedCamera { eye, fov });
+                s.finish_camera_armed = true;
+                s.director_status = "Finish camera saved and armed for this race".into();
+            }
+            s.save_finish_camera = false;
         }
     }
     let tf = get(a.transform, cam);
@@ -401,6 +628,38 @@ unsafe extern "C" fn on_late(this: Obj, mi: Obj) {
     pos(tf, &mut eye);
     let rot: unsafe extern "C" fn(Obj, *mut [f32; 4]) = std::mem::transmute(a.setrot);
     rot(tf, &mut q);
+    if let Ok(mut s) = state().lock() {
+        s.focus_markers.clear();
+        if s.settings.broadcast.focus_markers && !s.freecam {
+            if let Some(aspect) = aspect {
+                let rival = s.battle_info.as_ref().map(|b| b.partner);
+                s.focus_markers = hs
+                    .iter()
+                    .filter(|h| h.gate == gate || Some(h.gate) == rival)
+                    .filter_map(|h| {
+                        crate::markers::project(
+                            h.gate,
+                            Vec3 {
+                                y: h.pos.y + s.settings.broadcast.marker_height,
+                                ..h.pos
+                            },
+                            eye,
+                            q,
+                            fov,
+                            aspect,
+                        )
+                    })
+                    .collect();
+            }
+        }
+    }
+    if let Ok(s) = state().lock() {
+        if l.director_log != s.director_status {
+            l.director_log = s.director_status.clone();
+            crate::state::log(&format!("Director: {} / gate {} / length {:.0} m / camera ({:.1}, {:.1}, {:.1}) / fov {:.1}",
+                s.director_status, gate, s.race_distance(), eye.x, eye.y, eye.z, fov));
+        }
+    }
 }
 
 unsafe fn set_renderer_enabled(o: Obj, mut value: bool) {
@@ -741,7 +1000,12 @@ unsafe extern "C" fn on_canvas(mi: Obj) {
         s.race = racing;
         if !racing {
             s.gates.clear();
-            s.timing_rows.clear();
+            s.clear_telemetry();
+            l.timing_last = None;
+            l.director.reset();
+            l.fixed.reset();
+            l.auto_finish.reset();
+            l.battle.reset();
         }
         let scan = s.scan && racing;
         if scan {
@@ -1025,6 +1289,8 @@ unsafe fn install() -> Result<String, String> {
             .ok_or("HorseRaceInfo._rotationOnLane missing")?,
         horse_class: hc as usize,
         horse_data: method("Gallop.HorseRaceInfo", "get_HorseData", 0),
+        // Optional, observed in HorseData metadata. Never call InitTrainerName/setter.
+        trainer_name: method("Gallop.HorseData", "get_TrainerName", 0),
         gate: method("Gallop.HorseData", "get_GateNo", 0),
         find: il::method_with_param_types(
             il::class("UnityEngine.Object"),
@@ -1040,6 +1306,7 @@ unsafe fn install() -> Result<String, String> {
         renderer_type: il::type_object(il::class("UnityEngine.CanvasRenderer")) as usize,
         color_get: method("UnityEngine.CanvasRenderer", "GetColor", 0),
         alpha_set: method("UnityEngine.CanvasRenderer", "SetAlpha", 1),
+        aspect_get: method("UnityEngine.Camera", "get_aspect", 0),
         fov_get: method("UnityEngine.Camera", "get_fieldOfView", 0),
         fov_set: method("UnityEngine.Camera", "set_fieldOfView", 1),
         near_get: method("UnityEngine.Camera", "get_nearClipPlane", 0),
@@ -1419,6 +1686,19 @@ unsafe fn install_overhead_controls() -> Result<(), String> {
 }
 
 #[derive(Clone, Copy)]
+struct CourseApi {
+    distance: usize,
+    world_scale: usize,
+}
+impl CourseApi {
+    fn resolve(class: il::Class) -> Self {
+        Self {
+            distance: il::method(class, "GetCourseDistance", 0) as usize,
+            world_scale: il::method(class, "get_CourseDistance2World", 0) as usize,
+        }
+    }
+}
+#[derive(Clone, Copy)]
 struct TimingApi {
     name: usize,
     order: usize,
@@ -1453,11 +1733,12 @@ impl TimingApi {
     }
 }
 unsafe fn update_timing(l: &mut Live, racing: bool) {
-    let enabled = state().lock().map(|s| s.tower).unwrap_or(false);
+    let enabled = state().lock().map(|s| s.needs_telemetry()).unwrap_or(false);
     if !enabled || !racing {
         l.timing_last = None;
         if let Ok(mut s) = state().lock() {
-            s.timing_rows.clear();
+            s.clear_telemetry();
+            s.timing_status = "Waiting for race telemetry".into();
         }
         return;
     }
@@ -1470,10 +1751,30 @@ unsafe fn update_timing(l: &mut Live, racing: bool) {
     let Some(h) = l.manager else { return };
     let manager = target(h);
     if !valid(manager) {
+        if let Ok(mut s) = state().lock() {
+            s.clear_telemetry();
+        }
         return;
     }
+    let manager_class = il::object_class(manager);
+    if l.course_bindings
+        .is_none_or(|(class, _)| class != manager_class as usize)
+    {
+        l.course_bindings = Some((manager_class as usize, CourseApi::resolve(manager_class)));
+    }
+    let course_api = l.course_bindings.unwrap().1;
+    // Optional replay/course metadata. Missing getters or managed exceptions
+    // produce None; these values belong to this race and are never persisted.
+    let detected_length = scalar::<f32>(course_api.distance, manager)
+        .filter(|n| n.is_finite() && (100. ..=10000.).contains(n));
+    let world_scale = crate::director::valid_scale(scalar::<f32>(course_api.world_scale, manager));
     let api = API.get().unwrap();
+    let lookup_trainers = state()
+        .lock()
+        .map(|s| s.settings.tower.auto_trainers && s.settings.tower.show_trainers)
+        .unwrap_or(false);
     let mut rows = Vec::new();
+    let mut finished_gates = Vec::new();
     let mut complete = true;
     for horse in array(get(api.manager_horses, manager), 64) {
         if !il::object_is(horse, api.horse_class as il::Class) {
@@ -1498,6 +1799,9 @@ unsafe fn update_timing(l: &mut Live, racing: bool) {
         // Replay finish order is precomputed: do not reveal it before finishing.
         let order = scalar::<i32>(if finished { a.finish_order } else { a.order }, horse);
         let rank = order.filter(|v| (0..64).contains(v)).map(|v| v + 1);
+        if finished && rank.is_some() {
+            finished_gates.push(gate);
+        }
         let mut label = il::read_string(get(a.name, horse));
         if label.trim().is_empty() {
             label = format!("Runner {gate}");
@@ -1505,6 +1809,11 @@ unsafe fn update_timing(l: &mut Live, racing: bool) {
         rows.push(crate::timing::Runner {
             gate,
             name: label,
+            trainer_name: if lookup_trainers && api.trainer_name != 0 {
+                crate::timing::clean_trainer_name(&il::read_string(get(api.trainer_name, data)))
+            } else {
+                None
+            },
             rank,
             distance: scalar::<f32>(a.distance, horse),
             speed: scalar::<f32>(a.speed, horse),
@@ -1517,7 +1826,17 @@ unsafe fn update_timing(l: &mut Live, racing: bool) {
         } else {
             "Some telemetry getters are unavailable. Missing values display --.".into()
         };
-        s.timing_rows = rows;
+        if lookup_trainers {
+            let found = rows.iter().filter(|r| r.trainer_name.is_some()).count();
+            s.timing_status.push_str(&if api.trainer_name == 0 {
+                " Trainer lookup unavailable in this game build.".into()
+            } else {
+                format!(" Trainer names: {found}/{} supplied by game.", rows.len())
+            });
+        }
+        s.update_telemetry(rows, finished_gates, h);
+        s.detected_race_distance = detected_length;
+        s.course_world_scale = world_scale;
     }
 }
 

@@ -62,6 +62,9 @@ pub struct Settings {
     pub dark_mode: bool,
     pub enabled: Enabled,
     pub tower: crate::timing::TowerSettings,
+    pub battle: crate::battle::BattleSettings,
+    pub director: crate::director::DirectorSettings,
+    pub broadcast: crate::broadcast::BroadcastSettings,
     pub fps_60: bool,
     pub graphics: crate::graphics::Quality,
     pub free_speed: f32,
@@ -79,6 +82,9 @@ impl Default for Settings {
             dark_mode: false,
             enabled: Enabled::default(),
             tower: crate::timing::TowerSettings::default(),
+            battle: crate::battle::BattleSettings::default(),
+            director: crate::director::DirectorSettings::default(),
+            broadcast: crate::broadcast::BroadcastSettings::default(),
             fps_60: true,
             graphics: crate::graphics::Quality::default(),
             free_speed: 12.,
@@ -95,6 +101,9 @@ impl Default for Settings {
 impl Settings {
     pub fn sanitize(&mut self) {
         self.tower.sanitize();
+        self.battle.sanitize();
+        self.director.sanitize();
+        self.broadcast.sanitize();
         self.graphics.sanitize();
         self.enabled.graphics_applied.sanitize();
         self.target_transition = finite(self.target_transition, 0.7).clamp(0., 3.);

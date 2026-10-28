@@ -15,6 +15,9 @@ impl TargetTween {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
+    pub fn settled(&self) -> bool {
+        self.from.is_none()
+    }
     pub fn follow(
         &mut self,
         gate: i32,

@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TowerSettings {
+    pub animated_rows: bool,
+    pub position_changes: bool,
+    pub auto_trainers: bool,
     pub show_trainers: bool,
     pub trainer_names: std::collections::BTreeMap<i32, String>,
     pub speed: bool,
@@ -17,6 +20,9 @@ pub struct TowerSettings {
 impl Default for TowerSettings {
     fn default() -> Self {
         Self {
+            animated_rows: true,
+            position_changes: true,
+            auto_trainers: true,
             show_trainers: false,
             trainer_names: std::collections::BTreeMap::new(),
             speed: true,
@@ -56,6 +62,7 @@ impl TowerSettings {
 pub struct Runner {
     pub gate: i32,
     pub name: String,
+    pub trainer_name: Option<String>,
     pub rank: Option<i32>,
     pub distance: Option<f32>,
     pub speed: Option<f32>,
@@ -104,14 +111,45 @@ pub fn gap(rows: &[Runner], index: usize, interval: bool, seconds: bool) -> Opti
         Some(delta.max(0.))
     }
 }
-pub fn trainer_label<'a>(settings: &'a TowerSettings, runner: &Runner) -> Option<&'a str> {
+pub fn trainer_label<'a>(settings: &'a TowerSettings, runner: &'a Runner) -> Option<&'a str> {
+    if !settings.show_trainers {
+        return None;
+    }
     settings
-        .show_trainers
-        .then(|| settings.trainer_names.get(&runner.gate))
-        .flatten()
+        .trainer_names
+        .get(&runner.gate)
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            settings
+                .auto_trainers
+                .then_some(runner.trainer_name.as_deref())
+                .flatten()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
 }
+pub fn clean_trainer_name(value: &str) -> Option<String> {
+    let mut tag = false;
+    let text = value
+        .chars()
+        .filter(|c| {
+            if *c == '<' {
+                tag = true;
+                return false;
+            }
+            if *c == '>' {
+                tag = false;
+                return false;
+            }
+            !tag && !c.is_control()
+        })
+        .take(64)
+        .collect::<String>();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
 fn row_height(settings: &TowerSettings, runner: &Runner) -> f32 {
     if trainer_label(settings, runner).is_some() {
         48.
@@ -121,6 +159,88 @@ fn row_height(settings: &TowerSettings, runner: &Runner) -> f32 {
 }
 fn tower_height(settings: &TowerSettings, rows: &[Runner]) -> f32 {
     80. + rows.iter().map(|r| row_height(settings, r)).sum::<f32>()
+}
+#[derive(Clone, Debug)]
+struct MovingRow {
+    name: String,
+    y: f32,
+    rank: Option<i32>,
+    distance: Option<f32>,
+    change: i32,
+    change_left: f32,
+}
+#[derive(Default)]
+pub struct TowerMotion {
+    rows: std::collections::BTreeMap<i32, MovingRow>,
+}
+impl TowerMotion {
+    pub fn reset(&mut self) {
+        self.rows.clear();
+    }
+    fn update(&mut self, rows: &[Runner], settings: &TowerSettings, dt: f32) {
+        if rows.is_empty() {
+            self.reset();
+            return;
+        }
+        let dt = if dt.is_finite() { dt.clamp(0., 1.) } else { 0. };
+        let reset=self.rows.len()!=rows.len() || rows.iter().any(|r|match self.rows.get(&r.gate){
+            None=>true,Some(old)=>old.name!=r.name || matches!((nonnegative(r.distance),old.distance),(Some(now),Some(before)) if now+2.<before)
+        });
+        let ranks = rows
+            .iter()
+            .filter_map(|r| r.rank)
+            .collect::<std::collections::BTreeSet<_>>();
+        let valid = ranks.len() == rows.len()
+            && ranks
+                .iter()
+                .all(|rank| (1..=rows.len() as i32).contains(rank));
+        if reset {
+            self.reset();
+        }
+        let blend = 1. - (-12. * dt).exp();
+        let bottom = tower_height(settings, rows);
+        let mut top = 80.;
+        for r in rows {
+            let rank = valid.then_some(r.rank).flatten();
+            let height = row_height(settings, r);
+            let row = self.rows.entry(r.gate).or_insert_with(|| MovingRow {
+                name: r.name.clone(),
+                y: top,
+                rank,
+                distance: nonnegative(r.distance),
+                change: 0,
+                change_left: 0.,
+            });
+            row.change_left = (row.change_left - dt).max(0.);
+            if let (Some(before), Some(now)) = (row.rank, rank) {
+                if before != now {
+                    row.change = before - now;
+                    row.change_left = 3.;
+                }
+            }
+            if !valid || !settings.position_changes {
+                row.change_left = 0.;
+            }
+            row.rank = rank;
+            row.distance = nonnegative(r.distance);
+            row.y = if settings.animated_rows {
+                row.y + (top - row.y) * blend
+            } else {
+                top
+            };
+            row.y = row.y.clamp(80., (bottom - height).max(80.));
+            top += height;
+        }
+    }
+    fn row_y(&self, gate: i32, fallback: f32) -> f32 {
+        self.rows.get(&gate).map_or(fallback, |r| r.y)
+    }
+    fn change(&self, gate: i32) -> Option<(i32, f32)> {
+        self.rows.get(&gate).and_then(|r| {
+            (r.change != 0 && r.change_left > 0.)
+                .then_some((r.change, (r.change_left / 0.6).min(1.)))
+        })
+    }
 }
 fn fit_text(ui: &hudhook::imgui::Ui, value: &str, width: f32) -> String {
     if ui.calc_text_size(value)[0] <= width {
@@ -132,8 +252,16 @@ fn fit_text(ui: &hudhook::imgui::Ui, value: &str, width: f32) -> String {
     }
     format!("{text}...")
 }
-pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, selected: i32) {
+pub fn draw(
+    ui: &hudhook::imgui::Ui,
+    rows: &[Runner],
+    settings: &TowerSettings,
+    selected: i32,
+    secondary_gate: Option<i32>,
+    motion: &mut TowerMotion,
+) {
     use hudhook::imgui::{Condition, StyleColor, WindowFlags};
+    motion.update(rows, settings, ui.io().delta_time);
     if rows.is_empty() {
         return;
     }
@@ -209,7 +337,8 @@ pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, 
                 },
             );
             text(14., 56., muted, "POS");
-            text(62., 56., muted, "RUNNER");
+            let name_x = if settings.position_changes { 84. } else { 62. };
+            text(name_x, 56., muted, "RUNNER");
             let gap_right = logical_width - 14.;
             let speed_right = logical_width - 112.;
             if settings.speed {
@@ -235,7 +364,28 @@ pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, 
                 },
             );
             let mut top = 80.;
-            for (i, r) in rows.iter().enumerate() {
+            let mut paint_order = rows
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let y = motion.row_y(r.gate, top);
+                    top += row_height(settings, r);
+                    (i, r, y)
+                })
+                .collect::<Vec<_>>();
+            paint_order.sort_by_key(|(i, r, _)| {
+                (
+                    if r.gate == selected {
+                        2
+                    } else if Some(r.gate) == secondary_gate {
+                        1
+                    } else {
+                        0
+                    },
+                    std::cmp::Reverse(*i),
+                )
+            });
+            for (i, r, top) in paint_order {
                 let h = row_height(settings, r);
                 let tracked = r.gate == selected;
                 let leader = i == 0;
@@ -268,7 +418,21 @@ pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, 
                     [0.65, 0.70, 0.78, alpha * 0.3],
                 )
                 .build();
-                let name_x = 62.;
+                if Some(r.gate) == secondary_gate {
+                    rect(0., top, 3., top + h, accent);
+                }
+                if settings.position_changes {
+                    if let Some((change, fade)) = motion.change(r.gate) {
+                        let c = if change > 0 {
+                            [0.28, 0.85, 0.55, fade]
+                        } else {
+                            [1., 0.58, 0.38, fade]
+                        };
+                        ui.set_window_font_scale(scale * 0.8);
+                        text(45., top + (h - 16.) * 0.5, c, &format!("{change:+}"));
+                        ui.set_window_font_scale(scale);
+                    }
+                }
                 let name_end = if settings.speed {
                     logical_width - 180.
                 } else {
@@ -310,7 +474,6 @@ pub fn draw(ui: &hudhook::imgui::Ui, rows: &[Runner], settings: &TowerSettings, 
                         .unwrap_or_else(|| "--".into())
                 };
                 right(gap_right, numeric_y, fg, &v);
-                top += h;
             }
         });
 }
@@ -321,6 +484,7 @@ mod tests {
         Runner {
             gate,
             name: format!("Runner {gate}"),
+            trainer_name: None,
             rank,
             distance: Some(distance),
             speed: Some(speed),
@@ -382,6 +546,7 @@ mod layout_tests {
                 .map(|n| Runner {
                     gate: n,
                     name: format!("A very long runner name number {n}"),
+                    trainer_name: None,
                     rank: Some(n),
                     distance: Some(1500. - n as f32),
                     speed: Some(20.),
@@ -401,6 +566,8 @@ mod layout_tests {
                     ..TowerSettings::default()
                 },
                 7,
+                None,
+                &mut TowerMotion::default(),
             );
             let data = ctx.render();
             assert!(data.total_vtx_count > 500, "entire tower should be drawn");
@@ -428,6 +595,7 @@ mod trainer_tests {
         Runner {
             gate,
             name: "Tokai Teio".into(),
+            trainer_name: None,
             rank: Some(1),
             distance: Some(100.),
             speed: Some(20.),
@@ -468,5 +636,169 @@ mod trainer_tests {
             let scale = ((screen_height - 24.) / h).min(1.);
             assert!(h * scale <= screen_height - 23.9);
         }
+    }
+}
+
+#[cfg(test)]
+mod lookup_and_motion_tests {
+    use super::*;
+    fn rows() -> Vec<Runner> {
+        (1..=2)
+            .map(|g| Runner {
+                gate: g,
+                name: "Same character".into(),
+                trainer_name: Some(format!("Trainer {g}")),
+                rank: Some(g),
+                distance: Some(100. - g as f32),
+                speed: Some(20.),
+            })
+            .collect()
+    }
+    fn swap(rs: &mut Vec<Runner>) {
+        rs[0].rank = Some(2);
+        rs[1].rank = Some(1);
+        rs.swap(0, 1);
+    }
+    #[test]
+    fn automatic_names_and_manual_overrides() {
+        let mut s = TowerSettings::default();
+        let r = rows();
+        assert_eq!(trainer_label(&s, &r[0]), None);
+        s.show_trainers = true;
+        assert_eq!(trainer_label(&s, &r[0]), Some("Trainer 1"));
+        s.trainer_names.insert(1, "Manual".into());
+        assert_eq!(trainer_label(&s, &r[0]), Some("Manual"));
+        s.auto_trainers = false;
+        assert_eq!(trainer_label(&s, &r[0]), Some("Manual"));
+        s.trainer_names.insert(1, " ".into());
+        assert_eq!(trainer_label(&s, &r[0]), None);
+        s.auto_trainers = true;
+        assert_eq!(trainer_label(&s, &r[0]), Some("Trainer 1"));
+    }
+    #[test]
+    fn duplicates_keep_names_on_overtakes() {
+        let mut rs = rows();
+        swap(&mut rs);
+        let s = TowerSettings {
+            show_trainers: true,
+            ..Default::default()
+        };
+        assert_eq!(trainer_label(&s, &rs[0]), Some("Trainer 2"));
+        assert_eq!(trainer_label(&s, &rs[1]), Some("Trainer 1"));
+    }
+    #[test]
+    fn names_sanitize_and_lookup_setting_round_trips() {
+        assert_eq!(clean_trainer_name(" \n\t "), None);
+        assert_eq!(
+            clean_trainer_name("<color=red>Trainer</color>"),
+            Some("Trainer".into())
+        );
+        assert_eq!(
+            clean_trainer_name(&"\u{540d}".repeat(100))
+                .unwrap()
+                .chars()
+                .count(),
+            64
+        );
+        let s = TowerSettings {
+            auto_trainers: false,
+            ..Default::default()
+        };
+        let loaded: TowerSettings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(!loaded.auto_trainers);
+        assert!(
+            serde_json::from_str::<TowerSettings>("{}")
+                .unwrap()
+                .auto_trainers
+        );
+    }
+    #[test]
+    fn motion_mixed_heights_and_changes() {
+        let mut rs = rows();
+        rs[1].trainer_name = None;
+        let s = TowerSettings {
+            show_trainers: true,
+            ..Default::default()
+        };
+        let mut m = TowerMotion::default();
+        m.update(&rs, &s, 0.);
+        swap(&mut rs);
+        m.update(&rs, &s, 0.05);
+        assert!(m.row_y(2, 0.) > 80. && m.row_y(2, 0.) < 128.);
+        assert_eq!(m.change(2).unwrap().0, 1);
+        assert_eq!(m.change(1).unwrap().0, -1);
+        for _ in 0..40 {
+            m.update(&rs, &s, 0.1);
+        }
+        assert!(m.change(2).is_none());
+    }
+    #[test]
+    fn motion_frame_rate_independent() {
+        let s = TowerSettings::default();
+        let mut rs = rows();
+        let mut a = TowerMotion::default();
+        let mut b = TowerMotion::default();
+        a.update(&rs, &s, 0.);
+        b.update(&rs, &s, 0.);
+        swap(&mut rs);
+        for _ in 0..30 {
+            a.update(&rs, &s, 1. / 30.);
+        }
+        for _ in 0..120 {
+            b.update(&rs, &s, 1. / 120.);
+        }
+        assert!((a.row_y(1, 0.) - b.row_y(1, 0.)).abs() < 0.001);
+    }
+    #[test]
+    fn motion_lineup_and_rewind_clear() {
+        let s = TowerSettings::default();
+        let mut rs = rows();
+        let mut m = TowerMotion::default();
+        m.update(&rs, &s, 0.);
+        swap(&mut rs);
+        m.update(&rs, &s, 0.1);
+        rs[0].distance = Some(1.);
+        m.update(&rs, &s, 0.1);
+        assert!(m.change(2).is_none());
+        rs[0].name = "Other".into();
+        m.update(&rs, &s, 0.1);
+        assert_eq!(m.row_y(2, 0.), 80.);
+        rs.pop();
+        m.update(&rs, &s, 0.1);
+        assert_eq!(m.rows.len(), 1);
+        m.reset();
+        assert!(m.rows.is_empty());
+    }
+    #[test]
+    fn invalid_ranks_do_not_flash() {
+        let s = TowerSettings::default();
+        let mut rs = rows();
+        let mut m = TowerMotion::default();
+        m.update(&rs, &s, 0.);
+        rs[0].rank = None;
+        m.update(&rs, &s, 0.1);
+        assert!(m.change(1).is_none());
+        rs[0].rank = Some(2);
+        m.update(&rs, &s, 0.1);
+        assert!(m.change(2).is_none());
+    }
+    #[test]
+    fn reduced_motion_and_settings_persist() {
+        let s = TowerSettings {
+            animated_rows: false,
+            position_changes: false,
+            ..Default::default()
+        };
+        let mut rs = rows();
+        let mut m = TowerMotion::default();
+        m.update(&rs, &s, 0.);
+        swap(&mut rs);
+        m.update(&rs, &s, 0.);
+        assert_eq!(m.row_y(2, 0.), 80.);
+        assert!(m.change(2).is_none());
+        let loaded: TowerSettings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(!loaded.animated_rows && !loaded.position_changes);
     }
 }

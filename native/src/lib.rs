@@ -1,10 +1,15 @@
+mod battle;
+mod broadcast;
 mod camera_motion;
 mod capture;
 mod design;
+mod director;
+mod finish;
 mod framerate;
 mod graphics;
 mod hooks;
 mod il2cpp;
+mod markers;
 mod model;
 mod overlay;
 mod runtime;

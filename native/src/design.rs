@@ -296,7 +296,17 @@ mod preview {
         let aw = atlas.width;
         let ah = atlas.height;
         std::fs::write(dir.join("ui-preview-atlas.rgba"), atlas.data).unwrap();
-        ctx.io_mut().display_size = [1500., 900.];
+        let preview_width = std::env::var("RACEDIRECTOR_PREVIEW_WIDTH")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1500)
+            .clamp(320, 3840);
+        let preview_height = std::env::var("RACEDIRECTOR_PREVIEW_HEIGHT")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(900)
+            .clamp(240, 2160);
+        ctx.io_mut().display_size = [preview_width as f32, preview_height as f32];
         ctx.io_mut().delta_time = 1. / 60.;
         let names = [
             "Oguri Cap",
@@ -324,6 +334,7 @@ mod preview {
             .map(|(i, n)| crate::timing::Runner {
                 gate: (i + 1) as i32,
                 name: n.to_string(),
+                trainer_name: None,
                 rank: Some(i as i32 + 1),
                 distance: Some(1500. - i as f32 * 1.7),
                 speed: Some(21.3 - i as f32 * 0.07),
@@ -344,7 +355,7 @@ mod preview {
                 let commands=list.commands().filter_map(|cmd|if let DrawCmd::Elements{count,cmd_params}=cmd{Some(serde_json::json!({"count":count,"idx":cmd_params.idx_offset,"vtx":cmd_params.vtx_offset,"clip":cmd_params.clip_rect}))}else{None}).collect::<Vec<_>>();
                 lists.push(serde_json::json!({"vertices":vertices,"indices":list.idx_buffer(),"commands":commands}));
             }
-            std::fs::write(dir.join("ui-preview-geometry.json"),serde_json::to_vec(&serde_json::json!({"width":1500,"height":900,"atlasWidth":aw,"atlasHeight":ah,"lists":lists})).unwrap()).unwrap();
+            std::fs::write(dir.join("ui-preview-geometry.json"),serde_json::to_vec(&serde_json::json!({"width":preview_width,"height":preview_height,"atlasWidth":aw,"atlasHeight":ah,"lists":lists})).unwrap()).unwrap();
         }
     }
 }
